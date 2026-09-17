@@ -1,5 +1,11 @@
 local api_base_url = "https://ipod-2to6magyna-uc.a.run.app/"
-local version = "2.4"
+local version = "3.0"
+local media_backend = settings.get("music.media_backend", "")
+local revision = 0
+local audio_error = nil
+local search_notice = nil
+local elapsed_samples = 0
+local excluded = settings.get("music.exclude_speakers", {})
 
 local width, height = term.getSize()
 local tab = 1
@@ -12,8 +18,6 @@ local last_spotify_embed_url = nil
 local spotify_fallback_title = nil
 local search_results = nil
 local search_error = false
-local in_search_result = false
-local clicked_result = nil
 
 local playing = false
 local queue = {}
@@ -23,19 +27,11 @@ local looping = 0
 local volume = 3.0
 
 local playing_id = nil
-local last_download_url = nil
-local playing_status = 0
+local cancelledDownloads = {}
+local downloadSerial = 0
 local is_loading = false
 local is_error = false;
 
-local player_handle = nil
-local start = nil
-local pcm = nil
-local size = nil
-local decoder = require "cc.audio.dfpwm".make_decoder()
-local needs_next_chunk = 0
-local buffer
-local filter_previous_sample = 0
 
 -- Do not collect peripheral.find's multiple return values here. Enumerating the
 -- peripheral names has no practical vararg limit and also lets us refresh the
@@ -43,24 +39,27 @@ local filter_previous_sample = 0
 local speakers = {}
 
 local function refreshSpeakers()
-	local found = {}
+	local found, seen = {}, {}
 	for _, name in ipairs(peripheral.getNames()) do
-		if peripheral.hasType(name, "speaker") then
-			found[#found + 1] = {
-				name = name,
-				device = peripheral.wrap(name)
-			}
+		if not seen[name] and not excluded[name] and peripheral.hasType(name, "speaker") then
+			seen[name] = true
+			local device = peripheral.wrap(name)
+			if device then found[#found + 1] = {name = name, device = device} end
 		end
 	end
+	table.sort(found, function(a, b) return a.name < b.name end)
 	speakers = found
 	return #speakers
 end
 
+local function stopDevices()
+	for _, speaker in ipairs(speakers) do pcall(speaker.device.stop) end
+end
+
 local function stopAllSpeakers()
-	for _, speaker in ipairs(speakers) do
-		pcall(speaker.device.stop)
-	end
-	os.queueEvent("playback_stopped")
+	revision = revision + 1
+	stopDevices()
+	os.queueEvent("audio_update")
 end
 
 local function extractYouTubeVideoId(value)
@@ -86,6 +85,22 @@ local function spotifyOEmbedUrl(value)
 end
 
 local function requestMusicSearch(query)
+	search_notice = nil
+	if query:match("^https?://") and not query:match("^https?://[%w.]*youtube%.com/") and not query:match("^https?://youtu%.be/") then
+		last_search_url = nil
+		local path = query:match("^[^?#]+") or query
+		if path:lower():match("%.dfpwm$") then
+			search_results = {{id = query, direct_url = query, name = "Audio DFPWM", artist = query}}
+			return true
+		elseif media_backend ~= "" then
+			search_results = {{id = query, media_url = query, name = "Video externo", artist = query}}
+			return true
+		else
+			search_error = true
+			search_notice = "Outros sites: configure music.media_backend"
+			return false
+		end
+	end
 	last_search_url = api_base_url .. "?v=" .. version .. "&search=" .. textutils.urlEncode(query)
 	local requested = http.request(last_search_url)
 	if not requested then
@@ -95,590 +110,341 @@ local function requestMusicSearch(query)
 	return requested
 end
 
-local function enhanceAudio(samples)
-	-- A very light low-pass filter reduces DFPWM quantisation hiss while
-	-- preserving almost all musical detail. Integer-style weights keep this
-	-- inexpensive enough to run continuously on a ComputerCraft computer.
-	for i = 1, #samples do
-		local current = samples[i]
-		local filtered = math.floor((current * 7 + filter_previous_sample) / 8 + 0.5)
-		samples[i] = filtered
-		filter_previous_sample = filtered
-	end
-	return samples
-end
 
 refreshSpeakers()
-if #speakers == 0 then
-	error("No speakers attached. You need to connect a speaker to this computer. If this is an Advanced Noisy Pocket Computer, then this is a bug, and you should try restarting your Minecraft game.", 0)
-end
 
+local scroll = {0, 0, 0}
+local buttons = {}
+local selected = nil
+local query_text = ""
 local function clip(value, maximum)
-	value = tostring(value or "")
-	if maximum <= 0 then return "" end
-	if #value <= maximum then return value end
-	if maximum <= 3 then return value:sub(1, maximum) end
-	return value:sub(1, maximum - 3) .. "..."
+	value = tostring(value or ""):gsub("[\r\n\t]", " ")
+	if maximum < 1 then return "" end
+	return #value > maximum and (value:sub(1, math.max(0, maximum - 1)) .. "~") or value
+end
+local function text(x, y, value, fg, bg, count)
+	if y < 1 or y > height or x < 1 or x > width then return end
+	term.setCursorPos(x, y)
+	term.setTextColor(fg or colors.white)
+	term.setBackgroundColor(bg or colors.black)
+	term.write(clip(value, math.min(count or width, width - x + 1)))
+end
+local function bar(y, color)
+	term.setCursorPos(1, y)
+	term.setBackgroundColor(color)
+	term.clearLine()
+end
+local function button(x, y, label, action, active)
+	local value = " " .. label .. " "
+	text(x, y, value, active and colors.black or colors.white, active and colors.cyan or colors.gray)
+	buttons[#buttons + 1] = {x=x, y=y, w=#value, action=action}
+end
+local function submitSearch(input)
+	input = input:match("^%s*(.-)%s*$")
+	scroll[2], selected = 0, nil
+	last_search, search_results, search_notice = input, nil, nil
+	last_search_url, last_spotify_url, last_spotify_embed_url = nil, nil, nil
+	spotify_fallback_title, search_error = nil, false
+	if input == "" then return end
+	if isSpotifyUrl(input) then
+		last_spotify_url = spotifyOEmbedUrl(input)
+		if not http.request(last_spotify_url) then
+			last_spotify_url, search_error = nil, true
+		end
+	else
+		local direct_id = extractYouTubeVideoId(input)
+		if direct_id then
+			search_results = {{id=direct_id, name="Video YouTube", artist="Link pronto para tocar"}}
+		end
+		requestMusicSearch(input)
+	end
 end
 
-local function drawText(x, y, value, foreground, background, maximum)
-	if y < 1 or y > height or x > width then return end
-	term.setCursorPos(math.max(1, x), y)
-	term.setTextColor(foreground or colors.white)
-	term.setBackgroundColor(background or colors.black)
-	term.write(clip(value, maximum or (width - x + 1)))
+local function playTrack(item)
+	stopAllSpeakers()
+	if item.type == "playlist" then
+		queue = {}
+		for _, track in ipairs(item.playlist_items or {}) do queue[#queue+1] = track end
+		now_playing = table.remove(queue, 1)
+	else now_playing = item end
+	playing, is_error = now_playing ~= nil, false
+	selected, tab = nil, 1
+	os.queueEvent("audio_update")
 end
-
-local function drawButton(x, y, label, active, enabled)
-	local background = active and colors.cyan or colors.gray
-	local foreground = active and colors.black or (enabled == false and colors.lightGray or colors.white)
-	drawText(x, y, " " .. label .. " ", foreground, background)
+local function skipTrack()
+	stopAllSpeakers()
+	if looping == 1 and now_playing then queue[#queue+1] = now_playing end
+	now_playing = table.remove(queue, 1)
+	playing, is_error = now_playing ~= nil, false
+	os.queueEvent("audio_update")
 end
-
-local function volumeBarWidth()
-	return math.min(24, math.max(8, width - 3))
+local function queueItem(item, nextUp)
+	local items = item.type == "playlist" and (item.playlist_items or {}) or {item}
+	if nextUp then
+		for i=#items,1,-1 do table.insert(queue, 1, items[i]) end
+	else for _, track in ipairs(items) do queue[#queue+1] = track end end
+	selected = nil
 end
 
 function redrawScreen()
-	if waiting_for_input then return end
-
 	width, height = term.getSize()
+	buttons = {}
 	term.setCursorBlink(false)
 	term.setBackgroundColor(colors.black)
 	term.clear()
-
-	local half = math.floor(width / 2)
-	paintutils.drawFilledBox(1, 1, half, 1, tab == 1 and colors.cyan or colors.blue)
-	paintutils.drawFilledBox(half + 1, 1, width, 1, tab == 2 and colors.cyan or colors.blue)
-	drawText(2, 1, tab == 1 and "> NOW PLAYING" or "  NOW PLAYING", tab == 1 and colors.black or colors.white, tab == 1 and colors.cyan or colors.blue, half - 2)
-	drawText(half + 2, 1, tab == 2 and "> SEARCH" or "  SEARCH", tab == 2 and colors.black or colors.white, tab == 2 and colors.cyan or colors.blue, width - half - 2)
-
-	if tab == 1 then drawNowPlaying() else drawSearch() end
-end
-
-function drawNowPlaying()
-	if now_playing then
-		drawText(2, 3, now_playing.name, colors.white, colors.black, width - 3)
-		drawText(2, 4, now_playing.artist, colors.lightGray, colors.black, width - 3)
-	else
-		drawText(2, 3, "Nothing playing", colors.lightGray, colors.black)
-		drawText(2, 4, "Open Search to choose a song", colors.gray, colors.black, width - 3)
-	end
-
-	local status, status_color = "READY", colors.lime
-	if is_loading then
-		status, status_color = "LOADING AUDIO...", colors.orange
-	elseif is_error then
-		status, status_color = "NETWORK / SPEAKER ERROR", colors.red
-	elseif playing then
-		status, status_color = "PLAYING", colors.lime
-	elseif now_playing then
-		status, status_color = "PAUSED", colors.orange
-	end
-	drawText(2, 5, status, status_color, colors.black)
-	local speaker_label = #speakers .. (#speakers == 1 and " SPEAKER" or " SPEAKERS")
-	drawText(math.max(2, width - #speaker_label), 5, speaker_label, #speakers > 0 and colors.cyan or colors.red, colors.black)
-
-	local can_play = now_playing ~= nil or #queue > 0
-	drawButton(2, 6, playing and "STOP" or "PLAY", playing, can_play)
-	drawButton(9, 6, "SKIP", false, can_play)
-	local loop_label = looping == 0 and "LOOP OFF" or (looping == 1 and "LOOP ALL" or "LOOP ONE")
-	drawButton(16, 6, loop_label, looping ~= 0, true)
-
-	local bar_width = volumeBarWidth()
-	paintutils.drawFilledBox(2, 8, 1 + bar_width, 8, colors.gray)
-	local filled = math.floor(bar_width * (volume / 3) + 0.5)
-	if filled > 0 then paintutils.drawFilledBox(2, 8, 1 + filled, 8, colors.lime) end
-	local percent = math.floor(100 * (volume / 3) + 0.5)
-	drawText(math.min(width - 6, 3 + bar_width), 8, percent .. "%", colors.white, colors.black)
-	drawText(2, 10, "UP NEXT  " .. #queue, colors.cyan, colors.black)
-
-	local max_items = math.max(0, math.floor((height - 10) / 2))
-	for i = 1, math.min(#queue, max_items) do
-		local y = 11 + (i - 1) * 2
-		drawText(2, y, i .. ". " .. queue[i].name, colors.white, colors.black, width - 3)
-		drawText(5, y + 1, queue[i].artist, colors.gray, colors.black, width - 6)
-	end
-	if #queue == 0 and height >= 11 then
-		drawText(2, 11, "Queue is empty", colors.gray, colors.black)
-	end
-end
-
-function drawSearch()
-	paintutils.drawFilledBox(2, 3, width - 1, 5, colors.lightGray)
-	drawText(3, 3, "YOUTUBE SEARCH", colors.gray, colors.lightGray)
-	drawText(3, 4, last_search or "Paste a link or type a song...", colors.black, colors.lightGray, width - 5)
-	drawText(3, 5, "Click here to search", colors.gray, colors.lightGray)
-
-	if search_results then
-		local max_results = math.max(0, math.floor((height - 6) / 2))
-		for i = 1, math.min(#search_results, max_results) do
-			local y = 7 + (i - 1) * 2
-			drawText(2, y, i .. ". " .. search_results[i].name, colors.white, colors.black, width - 3)
-			drawText(5, y + 1, search_results[i].artist, colors.gray, colors.black, width - 6)
+	bar(1, colors.blue)
+	text(2,1,"MUSIC / 3.0",colors.white,colors.blue)
+	local count = tostring(#speakers) .. " SPK"
+	text(math.max(16,width-#count),1,count,colors.cyan,colors.blue)
+	button(2,2,"PLAYER",function() tab=1; selected=nil end,tab==1)
+	button(11,2,"BUSCA",function() tab=2; selected=nil end,tab==2)
+	button(19,2,"SAIDAS",function() tab=3; selected=nil end,tab==3)
+	bar(height, colors.gray)
+	text(2,height,"Roda: rolar | Ctrl+T: sair",colors.lightGray,colors.gray)
+	if selected then
+		text(2,4,selected.name,colors.cyan)
+		text(2,5,selected.artist,colors.lightGray)
+		button(2,7,"TOCAR AGORA",function() playTrack(selected) end,true)
+		button(2,9,"PROXIMA",function() queueItem(selected,true) end)
+		button(2,11,"ADICIONAR A FILA",function() queueItem(selected,false) end)
+		button(2,13,"VOLTAR",function() selected=nil end)
+	elseif tab == 1 then
+		text(2,4,now_playing and now_playing.name or "Sua proxima musica comeca aqui",colors.cyan)
+		text(2,5,now_playing and now_playing.artist or "Abra BUSCA e cole um link.",colors.lightGray)
+		local state = is_error and "ERRO" or is_loading and "CARREGANDO" or playing and "TOCANDO" or "PARADO"
+		text(2,6,state .. "  /  " .. math.floor(elapsed_samples/48000) .. "s enviados",is_error and colors.red or colors.lime)
+		button(2,8,playing and "PARAR" or "TOCAR",function()
+			if playing then playing=false; stopAllSpeakers()
+			elseif now_playing then playTrack(now_playing)
+			elseif #queue>0 then playTrack(table.remove(queue,1)) end
+		end,playing)
+		button(11,8,"PULAR",skipTrack)
+		button(20,8,({"LOOP -","LOOP FILA","LOOP 1"})[looping+1],function() looping=(looping+1)%3 end,looping>0)
+		local w = math.max(2,width-13)
+		local n = math.floor(w*volume/3+0.5)
+		text(2,10,string.rep(" ",n),colors.black,colors.cyan)
+		text(2+n,10,string.rep(" ",w-n),colors.white,colors.gray)
+		text(w+3,10,math.floor(volume/3*100+0.5).."%",colors.cyan)
+		text(2,12,"FILA / "..#queue,colors.lightBlue)
+		if is_error then text(2,13,audio_error or "Falha no audio",colors.red)
+		else
+			for row=0,math.max(-1,height-15) do
+				local index=scroll[1]+row+1
+				if queue[index] then text(2,14+row,index..". "..queue[index].name) end
+			end
 		end
-		if #search_results == 0 then drawText(2, 7, "No results found", colors.orange, colors.black) end
-	elseif search_error then
-		drawText(2, 7, "Could not reach the music service", colors.red, colors.black)
-	elseif last_spotify_url or last_spotify_embed_url then
-		drawText(2, 7, "Reading Spotify link...", colors.lime, colors.black)
-	elseif last_search_url then
-		drawText(2, 7, "Searching...", colors.orange, colors.black)
-	else
-		drawText(2, 7, "Tip: direct YouTube links are the fastest option.", colors.lightGray, colors.black, width - 3)
-	end
-
-	if in_search_result and search_results and search_results[clicked_result] then
-		term.setBackgroundColor(colors.black)
-		term.clear()
-		drawText(2, 2, search_results[clicked_result].name, colors.white, colors.black, width - 3)
-		drawText(2, 3, search_results[clicked_result].artist, colors.lightGray, colors.black, width - 3)
-		drawText(2, 4, "CHOOSE AN ACTION", colors.cyan, colors.black)
-		drawButton(2, 6, "PLAY NOW", true, true)
-		drawButton(2, 8, "PLAY NEXT", false, true)
-		drawButton(2, 10, "ADD TO QUEUE", false, true)
-		drawButton(2, 13, "CANCEL", false, true)
+	elseif tab == 2 then
+		bar(4,colors.gray)
+		text(2,4,(waiting_for_input and "> " or "Buscar: ")..query_text,colors.white,colors.gray,width-2)
+		text(2,5,"Cole o link, depois pressione Enter",colors.lightGray)
+		if waiting_for_input then
+			term.setCursorPos(math.min(width,4+#query_text),4)
+			term.setCursorBlink(true)
+		end
+		if search_notice then text(2,7,search_notice,colors.orange)
+		elseif search_error then text(2,7,"Falha na busca. Tente novamente.",colors.red)
+		elseif last_spotify_url or last_spotify_embed_url then text(2,7,"Consultando Spotify...",colors.lime)
+		elseif not search_results and last_search_url then text(2,7,"Buscando...",colors.orange) end
+		for row=0,math.floor((height-9)/2) do
+			local index=scroll[2]+row+1
+			local item=search_results and search_results[index]
+			if item then
+				local y=8+row*2
+				text(2,y,index..". "..item.name,colors.cyan)
+				text(4,y+1,item.artist,colors.lightGray)
+				buttons[#buttons+1]={x=1,y=y,w=width,h=2,action=function() selected=item; waiting_for_input=false end}
+			end
+		end
+	elseif tab == 3 then
+		text(2,4,"SAIDAS CONECTADAS / "..#speakers,colors.cyan)
+		text(2,5,"Novas saidas entram na proxima faixa.",colors.lightGray)
+		text(2,6,"Use 1 conexao por speaker; evite aliases.",colors.orange)
+		button(2,7,"REINICIAR GRUPO",function()
+			refreshSpeakers()
+			if now_playing then playTrack(now_playing) end
+		end)
+		for row=0,height-10 do
+			local item=speakers[scroll[3]+row+1]
+			if item then text(2,8+row,"+ "..item.name,colors.lime) end
+		end
 	end
 end
 
 function uiLoop()
-	redrawScreen()
-
 	while true do
-		if waiting_for_input then
-			parallel.waitForAny(
-				function()
-					term.setCursorPos(3,4)
-					term.setBackgroundColor(colors.white)
-					term.setTextColor(colors.black)
-					local input = read()
-					input = input:match("^%s*(.-)%s*$")
-
-					if string.len(input) > 0 then
-						last_search = input
-						search_results = nil
-						search_error = false
-
-						if isSpotifyUrl(input) then
-							last_search_url = nil
-							last_spotify_embed_url = nil
-							spotify_fallback_title = nil
-							last_spotify_url = spotifyOEmbedUrl(input)
-							local requested = http.request(last_spotify_url)
-							if not requested then
-								last_spotify_url = nil
-								search_error = true
-							end
-						else
-							last_spotify_url = nil
-							last_spotify_embed_url = nil
-							spotify_fallback_title = nil
-							local direct_id = extractYouTubeVideoId(input)
-							if direct_id then
-								-- Show a usable result immediately. The metadata request below
-								-- replaces this placeholder when it finishes.
-								search_results = {{
-									id = direct_id,
-									name = "YouTube video",
-									artist = "Direct link - ready to play"
-								}}
-							end
-							requestMusicSearch(input)
-						end
-					else
-						last_search = nil
-						last_search_url = nil
-						last_spotify_url = nil
-						last_spotify_embed_url = nil
-						spotify_fallback_title = nil
-						search_results = nil
-						search_error = false
-					end
-
-					waiting_for_input = false
-					os.queueEvent("redraw_screen")
-				end,
-				function()
-					while waiting_for_input do
-						local event, button, x, y = os.pullEvent("mouse_click")
-						if y < 3 or y > 5 or x < 2 or x > width-1 then
-							waiting_for_input = false
-							os.queueEvent("redraw_screen")
-							break
-						end
-					end
+		redrawScreen()
+		local event,a,b,c = os.pullEvent()
+		if event=="mouse_click" then
+			if tab==2 and not selected and c==4 then
+				waiting_for_input=true
+			else
+				for _, hit in ipairs(buttons) do
+					if b>=hit.x and b<hit.x+hit.w and c>=hit.y and c<hit.y+(hit.h or 1) then hit.action(); break end
 				end
-			)
-		else
-			parallel.waitForAny(
-				function()
-					local event, button, x, y = os.pullEvent("mouse_click")
-
-					if button == 1 then
-						-- Tabs
-						if in_search_result == false then
-							if y == 1 then
-								if x < width/2 then
-									tab = 1
-								else
-									tab = 2
-								end
-								redrawScreen()
-							end
-						end
-						
-						if tab == 2 and in_search_result == false then
-							-- Search box click
-							if y >= 3 and y <= 5 and x >= 1 and x <= width-1 then
-								paintutils.drawFilledBox(2,3,width-1,5,colors.white)
-								term.setBackgroundColor(colors.white)
-								waiting_for_input = true
-							end
-		
-							-- Search result click
-							if search_results then
-								for i=1,#search_results do
-									if y == 7 + (i-1)*2 or y == 8 + (i-1)*2 then
-										term.setBackgroundColor(colors.white)
-										term.setTextColor(colors.black)
-										term.setCursorPos(2,7 + (i-1)*2)
-										term.clearLine()
-										term.write(search_results[i].name)
-										term.setTextColor(colors.gray)
-										term.setCursorPos(2,8 + (i-1)*2)
-										term.clearLine()
-										term.write(search_results[i].artist)
-										sleep(0.2)
-										in_search_result = true
-										clicked_result = i
-										redrawScreen()
-									end
-								end
-							end
-						elseif tab == 2 and in_search_result == true then
-							-- Search result menu clicks
-		
-							term.setBackgroundColor(colors.white)
-							term.setTextColor(colors.black)
-		
-							if y == 6 then
-								term.setCursorPos(2,6)
-								term.clearLine()
-								term.write("Play now")
-								sleep(0.2)
-								in_search_result = false
-								stopAllSpeakers()
-								playing = true
-								is_error = false
-								playing_id = nil
-								if search_results[clicked_result].type == "playlist" then
-									now_playing = search_results[clicked_result].playlist_items[1]
-									queue = {}
-									if #search_results[clicked_result].playlist_items > 1 then
-										for i=2, #search_results[clicked_result].playlist_items do
-											table.insert(queue, search_results[clicked_result].playlist_items[i])
-										end
-									end
-								else
-									now_playing = search_results[clicked_result]
-								end
-								os.queueEvent("audio_update")
-							end
-		
-							if y == 8 then
-								term.setCursorPos(2,8)
-								term.clearLine()
-								term.write("Play next")
-								sleep(0.2)
-								in_search_result = false
-								if search_results[clicked_result].type == "playlist" then
-									for i = #search_results[clicked_result].playlist_items, 1, -1 do
-										table.insert(queue, 1, search_results[clicked_result].playlist_items[i])
-									end
-								else
-									table.insert(queue, 1, search_results[clicked_result])
-								end
-								os.queueEvent("audio_update")
-							end
-		
-							if y == 10 then
-								term.setCursorPos(2,10)
-								term.clearLine()
-								term.write("Add to queue")
-								sleep(0.2)
-								in_search_result = false
-								if search_results[clicked_result].type == "playlist" then
-									for i = 1, #search_results[clicked_result].playlist_items do
-										table.insert(queue, search_results[clicked_result].playlist_items[i])
-									end
-								else
-									table.insert(queue, search_results[clicked_result])
-								end
-								os.queueEvent("audio_update")
-							end
-		
-							if y == 13 then
-								term.setCursorPos(2,13)
-								term.clearLine()
-								term.write("Cancel")
-								sleep(0.2)
-								in_search_result = false
-							end
-		
-							redrawScreen()
-						elseif tab == 1 and in_search_result == false then
-							-- Now playing tab clicks
-		
-							if y == 6 then
-								-- Play/stop button
-								if x >= 2 and x < 2 + 6 then
-									if playing or now_playing ~= nil or #queue > 0 then
-										term.setBackgroundColor(colors.white)
-										term.setTextColor(colors.black)
-										term.setCursorPos(2, 6)
-										if playing then
-											term.write(" Stop ")
-										else 
-											term.write(" Play ")
-										end
-										sleep(0.2)
-									end
-									if playing then
-										playing = false
-										stopAllSpeakers()
-										playing_id = nil
-										is_loading = false
-										is_error = false
-										os.queueEvent("audio_update")
-									elseif now_playing ~= nil then
-										playing_id = nil
-										playing = true
-										is_error = false
-										os.queueEvent("audio_update")
-									elseif #queue > 0 then
-										now_playing = queue[1]
-										table.remove(queue, 1)
-										playing_id = nil
-										playing = true
-										is_error = false
-										os.queueEvent("audio_update")
-									end
-								end
-		
-								-- Skip button
-								if x >= 2 + 7 and x < 2 + 7 + 6 then
-									if now_playing ~= nil or #queue > 0 then
-										term.setBackgroundColor(colors.white)
-										term.setTextColor(colors.black)
-										term.setCursorPos(2 + 7, 6)
-										term.write(" Skip ")
-										sleep(0.2)
-		
-										is_error = false
-										if playing then
-											stopAllSpeakers()
-										end
-										if #queue > 0 then
-											if looping == 1 then
-												table.insert(queue, now_playing)
-											end
-											now_playing = queue[1]
-											table.remove(queue, 1)
-											playing_id = nil
-										else
-											now_playing = nil
-											playing = false
-											is_loading = false
-											is_error = false
-											playing_id = nil
-										end
-										os.queueEvent("audio_update")
-									end
-								end
-		
-								-- Loop button
-								if x >= 2 + 7 + 7 and x < 2 + 7 + 7 + 12 then
-									if looping == 0 then
-										looping = 1
-									elseif looping == 1 then
-										looping = 2
-									else
-										looping = 0
-									end
-								end
-							end
-
-							if y == 8 then
-								-- Volume slider
-								local bar_width = volumeBarWidth()
-								if x >= 2 and x <= 1 + bar_width then
-									volume = (x - 2) / (bar_width - 1) * 3
-								end
-							end
-
-							redrawScreen()
-						end
-					end
-				end,
-				function()
-					local event, button, x, y = os.pullEvent("mouse_drag")
-
-					if button == 1 then
-
-						if tab == 1 and in_search_result == false then
-
-							if y >= 7 and y <= 9 then
-								-- Volume slider
-								local bar_width = volumeBarWidth()
-								if x >= 2 and x <= 1 + bar_width then
-									volume = (x - 2) / (bar_width - 1) * 3
-								end
-							end
-
-							redrawScreen()
-						end
-					end
-				end,
-				function()
-					local event = os.pullEvent("redraw_screen")
-
-					redrawScreen()
-				end,
-				function()
-					os.pullEvent("term_resize")
-					width, height = term.getSize()
-					redrawScreen()
-				end,
-				function()
-					local event
-					repeat
-						event = os.pullEvent()
-					until event == "peripheral" or event == "peripheral_detach"
-					refreshSpeakers()
-					redrawScreen()
-				end
-			)
+			end
 		end
+		if (event=="mouse_click" or event=="mouse_drag") and a==1 and tab==1 and not selected and c==10 then
+			volume=math.max(0,math.min(3,(b-2)/math.max(1,width-14)*3))
+		elseif event=="mouse_scroll" then
+			local total=tab==1 and #queue or tab==2 and #(search_results or {}) or #speakers
+			scroll[tab]=math.max(0,math.min(math.max(0,total-1),scroll[tab]+a))
+		elseif tab==2 and not selected then
+			if event=="paste" or event=="char" then query_text=query_text..a; waiting_for_input=true
+			elseif event=="key" and a==keys.backspace then query_text=query_text:sub(1,-2)
+			elseif event=="key" and a==keys.enter then waiting_for_input=false; submitSearch(query_text) end
+		end
+		if event=="peripheral" or event=="peripheral_detach" then refreshSpeakers() end
 	end
 end
 
-local function playBufferOnAllSpeakers(audio, expected_id)
-	refreshSpeakers()
-	if #speakers == 0 then
-		return false, "No speakers attached"
-	end
-
-	-- Keep retrying only the speakers which have not accepted this chunk yet.
-	-- This prevents a busy speaker from silently losing chunks and avoids one
-	-- coroutine per speaker, so large wired networks remain cheap and in sync.
-	local pending = {}
-	for _, speaker in ipairs(speakers) do
-		pending[speaker.name] = speaker.device
-	end
-
-	while next(pending) do
-		for name, device in pairs(pending) do
-			local ok, accepted = pcall(device.playAudio, audio, volume)
-			if not ok then
-				-- It was probably detached. Do not block every other speaker.
-				pending[name] = nil
-			elseif accepted then
-				pending[name] = nil
+-- Table-based scheduler: each peripheral call starts before waiting for the
+-- others. No unpack/function-argument ceiling, and event filters are preserved.
+local function runWorkers(workers)
+	local tasks = {}
+	for i, fn in ipairs(workers) do tasks[i] = {co = coroutine.create(fn)} end
+	local event = {n = 0}
+	while true do
+		local alive = false
+		for _, task in ipairs(tasks) do
+			if coroutine.status(task.co) ~= "dead" then
+				if not task.filter or task.filter == event[1] or event[1] == "terminate" then
+					local ok, filter = coroutine.resume(task.co, table.unpack(event, 1, event.n))
+					if not ok then error(filter, 0) end
+					task.filter = filter
+				end
+				if coroutine.status(task.co) ~= "dead" then alive = true end
 			end
 		end
+		if not alive then return end
+		event = table.pack(os.pullEventRaw())
+	end
+end
 
-		if next(pending) then
-			local event = os.pullEventRaw()
-			if event == "terminate" then
-				error("Terminated", 0)
-			elseif event == "playback_stopped" then
-				return false
+local function playBufferOnAllSpeakers(audio, group)
+	if #group == 0 then error("Nenhum speaker conectado", 0) end
+	local workers = {}
+	for i, entry in ipairs(group) do
+		local speaker = entry
+		workers[i] = function()
+			local timer = os.startTimer(8)
+			while true do
+				if not peripheral.isPresent(speaker.name) then
+					error("Speaker removido: " .. speaker.name, 0)
+				end
+				local ok, accepted = pcall(speaker.device.playAudio, audio, volume)
+				if not ok then error("Falha no speaker: " .. speaker.name, 0) end
+				if accepted then break end
+				while true do
+					local event, name = os.pullEvent()
+					if event == "timer" and name == timer then
+						error("Speaker ocupado: " .. speaker.name, 0)
+					elseif event == "peripheral_detach" and name == speaker.name then
+						error("Speaker removido: " .. speaker.name, 0)
+					elseif event == "speaker_audio_empty" and name == speaker.name then
+						break
+					end
+				end
+			end
+			-- Barrier: no speaker receives chunk N+1 until every speaker is ready.
+			while true do
+				local event, name = os.pullEvent()
+				if event == "speaker_audio_empty" and name == speaker.name then
+					os.cancelTimer(timer)
+					return
+				elseif event == "timer" and name == timer then
+					error("Speaker sem resposta: " .. speaker.name, 0)
+				elseif event == "peripheral_detach" and name == speaker.name then
+					error("Speaker removido: " .. speaker.name, 0)
+				end
 			end
 		end
-
-		if not playing or playing_id ~= expected_id then
-			return false
-		end
 	end
+	runWorkers(workers)
+end
 
-	return true
+local function audioUrl(track)
+	if track.direct_url then return track.direct_url end
+	if track.media_url then
+		return media_backend:gsub("/+$", "") .. "/audio?url=" .. textutils.urlEncode(track.media_url)
+	end
+	return api_base_url .. "?v=2.4&id=" .. textutils.urlEncode(track.id)
 end
 
 function audioLoop()
 	while true do
-
-		-- AUDIO
-		if playing and now_playing then
-			local thisnowplayingid = now_playing.id
-			if playing_id ~= thisnowplayingid then
-				playing_id = thisnowplayingid
-				filter_previous_sample = 0
-				last_download_url = api_base_url .. "?v=" .. version .. "&id=" .. textutils.urlEncode(playing_id)
-				playing_status = 0
-				needs_next_chunk = 1
-
-				http.request({url = last_download_url, binary = true})
-				is_loading = true
-
-				os.queueEvent("redraw_screen")
-				os.queueEvent("audio_update")
-			elseif playing_status == 1 and needs_next_chunk == 1 then
-
-				while true do
-					local chunk = player_handle.read(size)
-					if not chunk then
-						if looping == 2 or (looping == 1 and #queue == 0) then
-							playing_id = nil
-						elseif looping == 1 and #queue > 0 then
-							table.insert(queue, now_playing)
-							now_playing = queue[1]
-							table.remove(queue, 1)
-							playing_id = nil
-						else
-							if #queue > 0 then
-								now_playing = queue[1]
-								table.remove(queue, 1)
-								playing_id = nil
-							else
-								now_playing = nil
-								playing = false
-								playing_id = nil
-								is_loading = false
-								is_error = false
-							end
-						end
-
-						os.queueEvent("redraw_screen")
-
-						player_handle.close()
-						needs_next_chunk = 0
-						break
-					else
-						if start then
-							chunk, start = start .. chunk, nil
-							size = size + 4
-						end
-				
-						buffer = enhanceAudio(decoder(chunk))
-						
-						local ok, accepted, err = pcall(playBufferOnAllSpeakers, buffer, thisnowplayingid)
-						if not ok or (not accepted and err) then
-							needs_next_chunk = 2
-							is_error = true
-							break
-						end
-						
-						-- If we're not playing anymore, exit the chunk processing loop
-						if not playing or playing_id ~= thisnowplayingid then
-							break
-						end
-					end
-				end
-				os.queueEvent("audio_update")
+		if not playing or not now_playing then
+			os.pullEvent("audio_update")
+		else
+			local track, token = now_playing, revision
+			local handle, finished = nil, false
+			downloadSerial = downloadSerial + 1
+			local requestUrl = audioUrl(track)
+			if not track.direct_url then
+				requestUrl = requestUrl .. "&request=" .. os.epoch("utc") .. "-" .. downloadSerial
 			end
+			refreshSpeakers()
+			local group = speakers -- Fixed for this track; newcomers join the next.
+			stopDevices()
+			playing_id = track.id
+			is_loading, is_error, audio_error = true, false, nil
+			elapsed_samples = 0
+			os.queueEvent("redraw_screen")
+			local ok, err = pcall(function()
+				parallel.waitForAny(
+					function()
+						if #group == 0 then error("Conecte um speaker e tente novamente", 0) end
+						local reason
+						local headers = nil
+						if track.media_url then
+							headers = {Authorization = "Bearer " .. settings.get("music.media_token", "")}
+						end
+						handle, reason = http.get(requestUrl, headers, true)
+						if not handle then error("Falha no download: " .. tostring(reason), 0) end
+						local decode = require("cc.audio.dfpwm").make_decoder()
+						is_loading = false
+						os.queueEvent("redraw_screen")
+						local final_duration = 0
+						while true do
+							local chunk = handle.read(16 * 1024)
+							if not chunk or #chunk == 0 then break end
+							local samples = decode(chunk)
+							playBufferOnAllSpeakers(samples, group)
+							final_duration = #samples / 48000
+							elapsed_samples = elapsed_samples + #samples
+							os.queueEvent("redraw_screen")
+						end
+						-- The readiness event allows more buffering; it is not an
+						-- audible-end event. Let the last chunk finish before stopping.
+						if final_duration > 0 then sleep(final_duration) end
+						finished = true
+					end,
+					function()
+						repeat os.pullEvent("audio_update")
+						until revision ~= token or not playing or now_playing ~= track
+					end
+				)
+			end)
+			if handle then pcall(handle.close) else cancelledDownloads[requestUrl] = true end
+			for _, speaker in ipairs(group) do pcall(speaker.device.stop) end
+			is_loading = false
+			if not ok then
+				if tostring(err):find("Terminated", 1, true) then error(err, 0) end
+				is_error, audio_error, playing = true, tostring(err), false
+			elseif finished and token == revision and now_playing == track then
+				if looping == 2 then
+					-- Repeat current track with a fresh decoder.
+				elseif looping == 1 then
+					queue[#queue + 1] = track
+					now_playing = table.remove(queue, 1)
+				elseif #queue > 0 then
+					now_playing = table.remove(queue, 1)
+				else
+					now_playing, playing = nil, false
+				end
+			end
+			playing_id = nil
+			os.queueEvent("redraw_screen")
 		end
-
-		os.pullEvent("audio_update")
 	end
 end
 
@@ -750,16 +516,9 @@ function httpLoop()
 						search_error = true
 					end
 					os.queueEvent("redraw_screen")
-				elseif url == last_download_url then
-					is_loading = false
-					player_handle = handle
-					start = handle.read(4)
-					size = 16 * 1024 - 4
-					playing_status = 1
-					os.queueEvent("redraw_screen")
-					os.queueEvent("audio_update")
-				else
+				elseif cancelledDownloads[url] then
 					handle.close()
+					cancelledDownloads[url] = nil
 				end
 			end,
 			function()
@@ -782,17 +541,16 @@ function httpLoop()
 					search_error = true
 					os.queueEvent("redraw_screen")
 				end
-				if url == last_download_url then
-					is_loading = false
-					is_error = true
-					playing = false
-					playing_id = nil
-					os.queueEvent("redraw_screen")
-					os.queueEvent("audio_update")
-				end
+				cancelledDownloads[url] = nil
 			end
 		)
 	end
 end
 
-parallel.waitForAny(uiLoop, audioLoop, httpLoop)
+local ok, err = pcall(parallel.waitForAny, uiLoop, audioLoop, httpLoop)
+stopDevices()
+term.setBackgroundColor(colors.black)
+term.setTextColor(colors.white)
+term.clear()
+term.setCursorPos(1, 1)
+if not ok and not tostring(err):find("Terminated", 1, true) then printError(err) end

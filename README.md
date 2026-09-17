@@ -2,7 +2,7 @@
 
 An improved music player for Minecraft computers running CC: Tweaked.
 
-**Version:** 2.4
+**Version:** 3.0
 
 ## Install or update
 
@@ -25,17 +25,34 @@ keeps the previous version as `music.bak`.
 
 - Accepts public Spotify links. It reads the public title with Spotify oEmbed
   and searches for the matching playable audio source.
-- Applies light PCM smoothing to reduce DFPWM hiss, while the self-hosted
-  backend uses higher-quality 48 kHz resampling and a limiter before encoding.
+- Fresh DFPWM decoder for every track. No additional lossy smoothing in the
+  client. The optional self-hosted backend converts audio to mono 48 kHz DFPWM.
 - Redesigned responsive UI with clearer playback state, queue, volume, and the
   live number of detected speakers.
 - Direct YouTube links appear immediately and can be played while metadata is
   still loading in the background.
 - Starts at CC: Tweaked's maximum supported speaker volume (`3.0`).
 - Uses every connected speaker found on the wired peripheral network.
-- Keeps large speaker arrays synchronized without creating one coroutine per
-  speaker or silently dropping chunks when one speaker is busy.
-- Detects speakers again during playback, supporting network changes.
+- Dispatches speaker calls concurrently with a table-based coroutine scheduler.
+  Every speaker must report readiness before the next chunk is sent.
+- No hardcoded speaker-count limit. Tested with up to 1,000 simulated speakers;
+  actual capacity and audible synchronization depend on Minecraft, CC and lag.
+- Fixed group per track: newly attached speakers join on the next track or via
+  SAIDAS > REINICIAR GRUPO. Removal/timeouts stop the group with a named error.
+- Redesigned Portuguese interface with PLAYER, BUSCA and SAIDAS tabs, scrolling,
+  editable search, queue actions, output list and group restart.
+
+## Other video sites
+
+Direct raw mono 48 kHz `.dfpwm` URLs work without an additional backend.
+Other HTTP(S) video URLs require the new [yt-dlp backend](backend/README.md).
+Its source and setup instructions are included, but it is **not deployed**.
+The default upstream server cannot gain new capabilities from this fork.
+Without configuration, the player explains the missing backend instead of
+searching YouTube for the entire external URL.
+
+No tool supports every site: the extractor, login requirements, DRM, regional
+restrictions and availability determine whether a video can be played.
 
 ## Spotify links
 
@@ -56,6 +73,19 @@ a Wired Modem attached to every remote speaker. Right-click each modem so its
 peripheral appears on the wired network. The player will then detect and use
 all of them automatically.
 
+Use one connection per physical speaker. A speaker exposed both directly and
+through a wired modem may have two names: CC does not provide a universal
+physical identity to merge aliases. Remove the duplicate connection or exclude
+its name in the Lua shell:
+
+```lua
+settings.set("music.exclude_speakers", {left = true})
+settings.save()
+```
+
+Restart music after changing this setting. Use only one player/computer per
+speaker group: other running players can interfere with its audio buffers.
+
 ## How to use
 
 1. Install the [CC: Tweaked](https://tweaked.cc/) mod to your world/server. Make sure you're using version 1.100.0 of the mod (released December 2021) or newer, or it won't work.
@@ -64,10 +94,23 @@ all of them automatically.
 4. Run the `music` command and enjoy your music.
 
 ## Troubleshooting
-- "No speakers attached" when using an Advanced Noisy Pocket Computer: Restart your Minecraft game. If that doesn't work, restart the server.
+- No speakers listed: check direct connections or activate each wired modem.
+- Speaker removed/busy/unresponsive: the group stops; check the named peripheral
+  and use SAIDAS > REINICIAR GRUPO. This restarts the current song.
 - "Module 'cc.audio.dfpwm' not found" error: Make sure you're using version 1.100.0 or newer of the CC: Tweaked mod (December 2021 or later). New audio features were added in this version, so it won't work in 1.99.X or below.
 
-## How to self-host
+## Tests
+
+```sh
+python -m pip install lupa yt-dlp
+python -m unittest discover -s tests -v
+```
+
+FFmpeg is also required. Tests exercise concurrent dispatch, buffer barriers,
+busy speakers, timeouts, detach, UI rendering and an actual local media-to-DFPWM
+conversion. No Minecraft playback or audible synchronization test was performed.
+
+## How to self-host the original YouTube backend
 
 > [!IMPORTANT]  
 > Self-hosting is not required to use this program. You can use the GitHub
