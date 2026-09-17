@@ -1,5 +1,5 @@
 local api_base_url = "https://ipod-2to6magyna-uc.a.run.app/"
-local version = "2.2"
+local version = "2.3"
 
 local width, height = term.getSize()
 local tab = 1
@@ -75,209 +75,129 @@ if #speakers == 0 then
 	error("No speakers attached. You need to connect a speaker to this computer. If this is an Advanced Noisy Pocket Computer, then this is a bug, and you should try restarting your Minecraft game.", 0)
 end
 
-function redrawScreen()
-	if waiting_for_input then
-		return
-	end
+local function clip(value, maximum)
+	value = tostring(value or "")
+	if maximum <= 0 then return "" end
+	if #value <= maximum then return value end
+	if maximum <= 3 then return value:sub(1, maximum) end
+	return value:sub(1, maximum - 3) .. "..."
+end
 
-	term.setCursorBlink(false)  -- Make sure cursor is off when redrawing
-	-- Clear the screen
+local function drawText(x, y, value, foreground, background, maximum)
+	if y < 1 or y > height or x > width then return end
+	term.setCursorPos(math.max(1, x), y)
+	term.setTextColor(foreground or colors.white)
+	term.setBackgroundColor(background or colors.black)
+	term.write(clip(value, maximum or (width - x + 1)))
+end
+
+local function drawButton(x, y, label, active, enabled)
+	local background = active and colors.cyan or colors.gray
+	local foreground = active and colors.black or (enabled == false and colors.lightGray or colors.white)
+	drawText(x, y, " " .. label .. " ", foreground, background)
+end
+
+local function volumeBarWidth()
+	return math.min(24, math.max(8, width - 3))
+end
+
+function redrawScreen()
+	if waiting_for_input then return end
+
+	width, height = term.getSize()
+	term.setCursorBlink(false)
 	term.setBackgroundColor(colors.black)
 	term.clear()
 
-	--Draw the three top tabs
-	term.setCursorPos(1,1)
-	term.setBackgroundColor(colors.gray)
-	term.clearLine()
-	
-	tabs = {" Now Playing ", " Search "}
-	
-	for i=1,#tabs,1 do
-		if tab == i then
-			term.setTextColor(colors.black)
-			term.setBackgroundColor(colors.white)
-		else
-			term.setTextColor(colors.white)
-			term.setBackgroundColor(colors.gray)
-		end
-		
-		term.setCursorPos((math.floor((width/#tabs)*(i-0.5)))-math.ceil(#tabs[i]/2)+1, 1)
-		term.write(tabs[i])
-	end
+	local half = math.floor(width / 2)
+	paintutils.drawFilledBox(1, 1, half, 1, tab == 1 and colors.cyan or colors.blue)
+	paintutils.drawFilledBox(half + 1, 1, width, 1, tab == 2 and colors.cyan or colors.blue)
+	drawText(2, 1, tab == 1 and "> NOW PLAYING" or "  NOW PLAYING", tab == 1 and colors.black or colors.white, tab == 1 and colors.cyan or colors.blue, half - 2)
+	drawText(half + 2, 1, tab == 2 and "> SEARCH" or "  SEARCH", tab == 2 and colors.black or colors.white, tab == 2 and colors.cyan or colors.blue, width - half - 2)
 
-	if tab == 1 then
-		drawNowPlaying()
-	elseif tab == 2 then
-		drawSearch()
-	end
+	if tab == 1 then drawNowPlaying() else drawSearch() end
 end
 
 function drawNowPlaying()
-	if now_playing ~= nil then
-		term.setBackgroundColor(colors.black)
-		term.setTextColor(colors.white)
-		term.setCursorPos(2,3)
-		term.write(now_playing.name)
-		term.setTextColor(colors.lightGray)
-		term.setCursorPos(2,4)
-		term.write(now_playing.artist)
+	if now_playing then
+		drawText(2, 3, now_playing.name, colors.white, colors.black, width - 3)
+		drawText(2, 4, now_playing.artist, colors.lightGray, colors.black, width - 3)
 	else
-		term.setBackgroundColor(colors.black)
-		term.setTextColor(colors.lightGray)
-		term.setCursorPos(2,3)
-		term.write("Not playing")
+		drawText(2, 3, "Nothing playing", colors.lightGray, colors.black)
+		drawText(2, 4, "Open Search to choose a song", colors.gray, colors.black, width - 3)
 	end
 
-	if is_loading == true then
-		term.setTextColor(colors.gray)
-		term.setBackgroundColor(colors.black)
-		term.setCursorPos(2,5)
-		term.write("Loading...")
-	elseif is_error == true then
-		term.setTextColor(colors.red)
-		term.setBackgroundColor(colors.black)
-		term.setCursorPos(2,5)
-		term.write("Network error")
+	local status, status_color = "READY", colors.lime
+	if is_loading then
+		status, status_color = "LOADING AUDIO...", colors.orange
+	elseif is_error then
+		status, status_color = "NETWORK / SPEAKER ERROR", colors.red
+	elseif playing then
+		status, status_color = "PLAYING", colors.lime
+	elseif now_playing then
+		status, status_color = "PAUSED", colors.orange
 	end
+	drawText(2, 5, status, status_color, colors.black)
+	local speaker_label = #speakers .. (#speakers == 1 and " SPEAKER" or " SPEAKERS")
+	drawText(math.max(2, width - #speaker_label), 5, speaker_label, #speakers > 0 and colors.cyan or colors.red, colors.black)
 
-	term.setTextColor(colors.white)
-	term.setBackgroundColor(colors.gray)
+	local can_play = now_playing ~= nil or #queue > 0
+	drawButton(2, 6, playing and "STOP" or "PLAY", playing, can_play)
+	drawButton(9, 6, "SKIP", false, can_play)
+	local loop_label = looping == 0 and "LOOP OFF" or (looping == 1 and "LOOP ALL" or "LOOP ONE")
+	drawButton(16, 6, loop_label, looping ~= 0, true)
 
-	if playing then
-		term.setCursorPos(2, 6)
-		term.write(" Stop ")
-	else
-		if now_playing ~= nil or #queue > 0 then
-			term.setTextColor(colors.white)
-			term.setBackgroundColor(colors.gray)
-		else
-			term.setTextColor(colors.lightGray)
-			term.setBackgroundColor(colors.gray)
-		end
-		term.setCursorPos(2, 6)
-		term.write(" Play ")
-	end
+	local bar_width = volumeBarWidth()
+	paintutils.drawFilledBox(2, 8, 1 + bar_width, 8, colors.gray)
+	local filled = math.floor(bar_width * (volume / 3) + 0.5)
+	if filled > 0 then paintutils.drawFilledBox(2, 8, 1 + filled, 8, colors.lime) end
+	local percent = math.floor(100 * (volume / 3) + 0.5)
+	drawText(math.min(width - 6, 3 + bar_width), 8, percent .. "%", colors.white, colors.black)
+	drawText(2, 10, "UP NEXT  " .. #queue, colors.cyan, colors.black)
 
-	if now_playing ~= nil or #queue > 0 then
-		term.setTextColor(colors.white)
-		term.setBackgroundColor(colors.gray)
-	else
-		term.setTextColor(colors.lightGray)
-		term.setBackgroundColor(colors.gray)
+	local max_items = math.max(0, math.floor((height - 10) / 2))
+	for i = 1, math.min(#queue, max_items) do
+		local y = 11 + (i - 1) * 2
+		drawText(2, y, i .. ". " .. queue[i].name, colors.white, colors.black, width - 3)
+		drawText(5, y + 1, queue[i].artist, colors.gray, colors.black, width - 6)
 	end
-	term.setCursorPos(2 + 7, 6)
-	term.write(" Skip ")
-
-	if looping ~= 0 then
-		term.setTextColor(colors.black)
-		term.setBackgroundColor(colors.white)
-	else
-		term.setTextColor(colors.white)
-		term.setBackgroundColor(colors.gray)
-	end
-	term.setCursorPos(2 + 7 + 7, 6)
-	if looping == 0 then
-		term.write(" Loop Off ")
-	elseif looping == 1 then
-		term.write(" Loop Queue ")
-	else
-		term.write(" Loop Song ")
-	end
-
-	term.setCursorPos(2,8)
-	paintutils.drawBox(2,8,25,8,colors.gray)
-	local width = math.floor(24 * (volume / 3) + 0.5)-1
-	if not (width == -1) then
-		paintutils.drawBox(2,8,2+width,8,colors.white)
-	end
-	if volume < 0.6 then
-		term.setCursorPos(2+width+2,8)
-		term.setBackgroundColor(colors.gray)
-		term.setTextColor(colors.white)
-	else
-		term.setCursorPos(2+width-3-(volume == 3 and 1 or 0),8)
-		term.setBackgroundColor(colors.white)
-		term.setTextColor(colors.black)
-	end
-	term.write(math.floor(100 * (volume / 3) + 0.5) .. "%")
-
-	if #queue > 0 then
-		term.setBackgroundColor(colors.black)
-		for i=1,#queue do
-			term.setTextColor(colors.white)
-			term.setCursorPos(2,10 + (i-1)*2)
-			term.write(queue[i].name)
-			term.setTextColor(colors.lightGray)
-			term.setCursorPos(2,11 + (i-1)*2)
-			term.write(queue[i].artist)
-		end
+	if #queue == 0 and height >= 11 then
+		drawText(2, 11, "Queue is empty", colors.gray, colors.black)
 	end
 end
 
 function drawSearch()
-	-- Search bar
-	paintutils.drawFilledBox(2,3,width-1,5,colors.lightGray)
-	term.setBackgroundColor(colors.lightGray)
-	term.setCursorPos(3,4)
-	term.setTextColor(colors.black)
-	term.write(last_search or "Search...")
+	paintutils.drawFilledBox(2, 3, width - 1, 5, colors.lightGray)
+	drawText(3, 3, "YOUTUBE SEARCH", colors.gray, colors.lightGray)
+	drawText(3, 4, last_search or "Paste a link or type a song...", colors.black, colors.lightGray, width - 5)
+	drawText(3, 5, "Click here to search", colors.gray, colors.lightGray)
 
-	--Search results
-	if search_results ~= nil then
-		term.setBackgroundColor(colors.black)
-		for i=1,#search_results do
-			term.setTextColor(colors.white)
-			term.setCursorPos(2,7 + (i-1)*2)
-			term.write(search_results[i].name)
-			term.setTextColor(colors.lightGray)
-			term.setCursorPos(2,8 + (i-1)*2)
-			term.write(search_results[i].artist)
+	if search_results then
+		local max_results = math.max(0, math.floor((height - 6) / 2))
+		for i = 1, math.min(#search_results, max_results) do
+			local y = 7 + (i - 1) * 2
+			drawText(2, y, i .. ". " .. search_results[i].name, colors.white, colors.black, width - 3)
+			drawText(5, y + 1, search_results[i].artist, colors.gray, colors.black, width - 6)
 		end
+		if #search_results == 0 then drawText(2, 7, "No results found", colors.orange, colors.black) end
+	elseif search_error then
+		drawText(2, 7, "Could not reach the music service", colors.red, colors.black)
+	elseif last_search_url then
+		drawText(2, 7, "Searching...", colors.orange, colors.black)
 	else
-		term.setCursorPos(2,7)
-		term.setBackgroundColor(colors.black)
-		if search_error == true then
-			term.setTextColor(colors.red)
-			term.write("Network error")
-		elseif last_search_url ~= nil then
-			term.setTextColor(colors.lightGray)
-			term.write("Searching...")
-		else
-			term.setCursorPos(1,7)
-			term.setTextColor(colors.lightGray)
-			print("Tip: You can paste YouTube video or playlist links.")
-		end
+		drawText(2, 7, "Tip: direct YouTube links are the fastest option.", colors.lightGray, colors.black, width - 3)
 	end
 
-	--fullscreen song options
-	if in_search_result == true then
+	if in_search_result and search_results and search_results[clicked_result] then
 		term.setBackgroundColor(colors.black)
 		term.clear()
-		term.setCursorPos(2,2)
-		term.setTextColor(colors.white)
-		term.write(search_results[clicked_result].name)
-		term.setCursorPos(2,3)
-		term.setTextColor(colors.lightGray)
-		term.write(search_results[clicked_result].artist)
-
-		term.setBackgroundColor(colors.gray)
-		term.setTextColor(colors.white)
-
-		term.setCursorPos(2,6)
-		term.clearLine()
-		term.write("Play now")
-
-		term.setCursorPos(2,8)
-		term.clearLine()
-		term.write("Play next")
-
-		term.setCursorPos(2,10)
-		term.clearLine()
-		term.write("Add to queue")
-
-		term.setCursorPos(2,13)
-		term.clearLine()
-		term.write("Cancel")
+		drawText(2, 2, search_results[clicked_result].name, colors.white, colors.black, width - 3)
+		drawText(2, 3, search_results[clicked_result].artist, colors.lightGray, colors.black, width - 3)
+		drawText(2, 4, "CHOOSE AN ACTION", colors.cyan, colors.black)
+		drawButton(2, 6, "PLAY NOW", true, true)
+		drawButton(2, 8, "PLAY NEXT", false, true)
+		drawButton(2, 10, "ADD TO QUEUE", false, true)
+		drawButton(2, 13, "CANCEL", false, true)
 	end
 end
 
@@ -532,15 +452,9 @@ function uiLoop()
 
 							if y == 8 then
 								-- Volume slider
-								if x >= 1 and x < 2 + 24 then
-									volume = (x - 1) / 24 * 3
-
-									-- for _, speaker in ipairs(speakers) do
-									-- 	speaker.stop()
-									-- 	os.queueEvent("playback_stopped")
-									-- end
-									-- playing_id = nil
-									-- os.queueEvent("audio_update")
+								local bar_width = volumeBarWidth()
+								if x >= 2 and x <= 1 + bar_width then
+									volume = (x - 2) / (bar_width - 1) * 3
 								end
 							end
 
@@ -557,15 +471,9 @@ function uiLoop()
 
 							if y >= 7 and y <= 9 then
 								-- Volume slider
-								if x >= 1 and x < 2 + 24 then
-									volume = (x - 1) / 24 * 3
-
-									-- for _, speaker in ipairs(speakers) do
-									-- 	speaker.stop()
-									-- 	os.queueEvent("playback_stopped")
-									-- end
-									-- playing_id = nil
-									-- os.queueEvent("audio_update")
+								local bar_width = volumeBarWidth()
+								if x >= 2 and x <= 1 + bar_width then
+									volume = (x - 2) / (bar_width - 1) * 3
 								end
 							end
 
@@ -576,6 +484,19 @@ function uiLoop()
 				function()
 					local event = os.pullEvent("redraw_screen")
 
+					redrawScreen()
+				end,
+				function()
+					os.pullEvent("term_resize")
+					width, height = term.getSize()
+					redrawScreen()
+				end,
+				function()
+					local event
+					repeat
+						event = os.pullEvent()
+					until event == "peripheral" or event == "peripheral_detach"
+					refreshSpeakers()
 					redrawScreen()
 				end
 			)

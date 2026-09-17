@@ -2,7 +2,7 @@
 
 An improved music player for Minecraft computers running CC: Tweaked.
 
-**Version:** 2.2
+**Version:** 2.3
 
 ## Install or update
 
@@ -23,6 +23,8 @@ keeps the previous version as `music.bak`.
 
 ## Improvements in this fork
 
+- Redesigned responsive UI with clearer playback state, queue, volume, and the
+  live number of detected speakers.
 - Direct YouTube links appear immediately and can be played while metadata is
   still loading in the background.
 - Starts at CC: Tweaked's maximum supported speaker volume (`3.0`).
@@ -30,6 +32,17 @@ keeps the previous version as `music.bak`.
 - Keeps large speaker arrays synchronized without creating one coroutine per
   speaker or silently dropping chunks when one speaker is busy.
 - Detects speakers again during playback, supporting network changes.
+
+## Connecting multiple speakers
+
+Speakers directly touching any of the computer's six faces are detected:
+`top`, `bottom`, `left`, `right`, `front`, and `back`.
+
+A speaker touching another speaker is **not** automatically connected. For
+speakers farther away, use a Wired Modem on the computer, Networking Cable, and
+a Wired Modem attached to every remote speaker. Right-click each modem so its
+peripheral appears on the wired network. The player will then detect and use
+all of them automatically.
 
 ## How to use
 
