@@ -15,11 +15,25 @@ class PlayerTests(unittest.TestCase):
             colors = {}
             for i,name in ipairs({"white","black","gray","lightGray","cyan","blue",
                 "lime","orange","red","lightBlue"}) do colors[name]=2^i end
+            screen, cursorX, cursorY = {}, 1, 1
+            local function blankScreen()
+                for y=1,19 do screen[y]=string.rep(" ",51) end
+            end
+            blankScreen()
             term = {getSize=function() return 51,19 end,
                 setCursorBlink=function() end, setBackgroundColor=function() end,
-                clear=function() end,setCursorPos=function(x,y)
+                clear=blankScreen,setCursorPos=function(x,y)
                     assert(x>=1 and x<=51 and y>=1 and y<=19)
-                end,setTextColor=function() end,write=function() end,clearLine=function() end}
+                    cursorX,cursorY=x,y
+                end,setTextColor=function() end,write=function(value)
+                    value=tostring(value)
+                    screen[cursorY]=screen[cursorY]:sub(1,cursorX-1)..value..
+                        screen[cursorY]:sub(cursorX+#value)
+                    cursorX=cursorX+#value
+                end,clearLine=function()
+                    screen[cursorY]=string.rep(" ",51)
+                    cursorX=1
+                end}
             peripheral = {getNames=function() return {} end,
                 hasType=function() return true end, isPresent=function() return true end}
             timerNumber = 0
@@ -46,7 +60,15 @@ class PlayerTests(unittest.TestCase):
                 search=requestMusicSearch,
                 result=function() return search_results, search_notice end,
                 refresh=refreshSpeakers,
-                count=function() return #speakers end
+                count=function() return #speakers end,
+                snapshot=function() return table.concat(screen,"\\n") end,
+                click=function(x,y)
+                    for _,hit in ipairs(buttons) do
+                        if hit.enabled and x>=hit.x and x<hit.x+hit.w and
+                            y>=hit.y and y<hit.y+hit.h then hit.action(); return true end
+                    end
+                    return false
+                end
             }
         """)
         lua.globals().api = api
@@ -58,6 +80,23 @@ class PlayerTests(unittest.TestCase):
             api.tab(tab)
             api.render()
         lua.execute('assert(load(...))', SOURCE)
+
+    def test_51x19_layout_and_full_width_tabs(self):
+        _, api = self.runtime()
+        api.render()
+        player = api.snapshot()
+        self.assertIn("MUSIC PLAYER", player.splitlines()[0])
+        self.assertIn("AGORA TOCANDO", player)
+        self.assertIn("VOLUME", player)
+        self.assertIn("FILA", player)
+        self.assertIn("CTRL+T: sair", player.splitlines()[-1])
+
+        self.assertTrue(api.click(20, 2))  # Empty area inside the BUSCA segment.
+        api.render()
+        self.assertIn("BUSCAR MUSICA OU VIDEO", api.snapshot())
+        self.assertTrue(api.click(45, 2))  # Empty area inside the SAIDAS segment.
+        api.render()
+        self.assertIn("SPEAKERS CONECTADOS", api.snapshot())
 
     def test_parallel_dispatch_and_barrier(self):
         for count in (1, 6, 128, 1000):

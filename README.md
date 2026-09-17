@@ -2,7 +2,7 @@
 
 An improved music player for Minecraft computers running CC: Tweaked.
 
-**Version:** 3.0
+**Version:** 3.1
 
 ## Install or update
 
@@ -39,8 +39,9 @@ keeps the previous version as `music.bak`.
   actual capacity and audible synchronization depend on Minecraft, CC and lag.
 - Fixed group per track: newly attached speakers join on the next track or via
   SAIDAS > REINICIAR GRUPO. Removal/timeouts stop the group with a named error.
-- Redesigned Portuguese interface with PLAYER, BUSCA and SAIDAS tabs, scrolling,
-  editable search, queue actions, output list and group restart.
+- Redesigned Portuguese interface on a consistent 51x19 grid: full-width tabs,
+  aligned controls, separate status/title rows, labeled volume, queue, editable
+  search, output list and group restart. Other terminal sizes remain responsive.
 
 ## Other video sites
 

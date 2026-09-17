@@ -1,5 +1,5 @@
 local api_base_url = "https://ipod-2to6magyna-uc.a.run.app/"
-local version = "3.0"
+local version = "3.1"
 local media_backend = settings.get("music.media_backend", "")
 local revision = 0
 local audio_error = nil
@@ -117,28 +117,46 @@ local scroll = {0, 0, 0}
 local buttons = {}
 local selected = nil
 local query_text = ""
+
 local function clip(value, maximum)
 	value = tostring(value or ""):gsub("[\r\n\t]", " ")
 	if maximum < 1 then return "" end
-	return #value > maximum and (value:sub(1, math.max(0, maximum - 1)) .. "~") or value
+	if #value <= maximum then return value end
+	if maximum == 1 then return "~" end
+	return value:sub(1, maximum - 1) .. "~"
 end
-local function text(x, y, value, fg, bg, count)
+
+local function text(x, y, value, foreground, background, maximum)
 	if y < 1 or y > height or x < 1 or x > width then return end
 	term.setCursorPos(x, y)
-	term.setTextColor(fg or colors.white)
-	term.setBackgroundColor(bg or colors.black)
-	term.write(clip(value, math.min(count or width, width - x + 1)))
+	term.setTextColor(foreground or colors.white)
+	term.setBackgroundColor(background or colors.black)
+	term.write(clip(value, math.min(maximum or width, width - x + 1)))
 end
-local function bar(y, color)
-	term.setCursorPos(1, y)
-	term.setBackgroundColor(color)
-	term.clearLine()
+
+local function fill(x1, y1, x2, y2, color)
+	x1, y1 = math.max(1, x1), math.max(1, y1)
+	x2, y2 = math.min(width, x2), math.min(height, y2)
+	if x1 > x2 or y1 > y2 then return end
+	local spaces = string.rep(" ", x2 - x1 + 1)
+	for y = y1, y2 do text(x1, y, spaces, colors.white, color) end
 end
-local function button(x, y, label, action, active)
-	local value = " " .. label .. " "
-	text(x, y, value, active and colors.black or colors.white, active and colors.cyan or colors.gray)
-	buttons[#buttons + 1] = {x=x, y=y, w=#value, action=action}
+
+local function centeredText(x, y, boxWidth, value, foreground, background)
+	value = clip(value, boxWidth)
+	local left = x + math.max(0, math.floor((boxWidth - #value) / 2))
+	text(left, y, value, foreground, background, boxWidth)
 end
+
+local function button(x, y, boxWidth, label, action, active, enabled)
+	boxWidth = math.max(1, math.min(boxWidth, width - x + 1))
+	local background = active and colors.cyan or (enabled == false and colors.gray or colors.blue)
+	local foreground = active and colors.black or (enabled == false and colors.lightGray or colors.white)
+	fill(x, y, x + boxWidth - 1, y, background)
+	centeredText(x, y, boxWidth, label, foreground, background)
+	buttons[#buttons + 1] = {x=x, y=y, w=boxWidth, h=1, action=action, enabled=enabled ~= false}
+end
+
 local function submitSearch(input)
 	input = input:match("^%s*(.-)%s*$")
 	scroll[2], selected = 0, nil
@@ -164,26 +182,180 @@ local function playTrack(item)
 	stopAllSpeakers()
 	if item.type == "playlist" then
 		queue = {}
-		for _, track in ipairs(item.playlist_items or {}) do queue[#queue+1] = track end
+		for _, track in ipairs(item.playlist_items or {}) do queue[#queue + 1] = track end
 		now_playing = table.remove(queue, 1)
-	else now_playing = item end
-	playing, is_error = now_playing ~= nil, false
+	else
+		now_playing = item
+	end
+	playing, is_error, audio_error = now_playing ~= nil, false, nil
 	selected, tab = nil, 1
 	os.queueEvent("audio_update")
 end
+
 local function skipTrack()
 	stopAllSpeakers()
-	if looping == 1 and now_playing then queue[#queue+1] = now_playing end
+	if looping == 1 and now_playing then queue[#queue + 1] = now_playing end
 	now_playing = table.remove(queue, 1)
 	playing, is_error = now_playing ~= nil, false
 	os.queueEvent("audio_update")
 end
+
 local function queueItem(item, nextUp)
 	local items = item.type == "playlist" and (item.playlist_items or {}) or {item}
 	if nextUp then
-		for i=#items,1,-1 do table.insert(queue, 1, items[i]) end
-	else for _, track in ipairs(items) do queue[#queue+1] = track end end
+		for i = #items, 1, -1 do table.insert(queue, 1, items[i]) end
+	else
+		for _, track in ipairs(items) do queue[#queue + 1] = track end
+	end
 	selected = nil
+end
+
+local function drawHeader()
+	fill(1, 1, width, 1, colors.blue)
+	text(2, 1, "MUSIC PLAYER", colors.white, colors.blue)
+	local info = "v" .. version .. "  " .. #speakers .. " SPK"
+	text(math.max(14, width - #info), 1, info, colors.cyan, colors.blue)
+
+	local first = math.floor(width / 3)
+	local second = math.floor(width / 3)
+	local third = width - first - second
+	button(1, 2, first, "PLAYER", function() tab=1; selected=nil; waiting_for_input=false end, tab==1)
+	button(first + 1, 2, second, "BUSCA", function() tab=2; selected=nil end, tab==2)
+	button(first + second + 1, 2, third, "SAIDAS", function() tab=3; selected=nil; waiting_for_input=false end, tab==3)
+	fill(1, 3, width, 3, colors.gray)
+end
+
+local function drawFooter()
+	fill(1, height, width, height, colors.blue)
+	text(2, height, "RODA: rolar", colors.lightGray, colors.blue)
+	local exit = "CTRL+T: sair"
+	text(math.max(15, width - #exit), height, exit, colors.lightGray, colors.blue)
+end
+
+local function drawSelection()
+	text(2, 4, "ITEM SELECIONADO", colors.lightBlue)
+	text(2, 5, selected.name, colors.cyan, colors.black, width - 3)
+	text(2, 6, selected.artist, colors.lightGray, colors.black, width - 3)
+	button(2, 8, math.min(15, width - 3), "TOCAR AGORA", function() playTrack(selected) end, true)
+	button(2, 10, math.min(15, width - 3), "TOCAR DEPOIS", function() queueItem(selected, true) end)
+	button(2, 12, math.min(20, width - 3), "ADICIONAR A FILA", function() queueItem(selected, false) end)
+	button(2, 14, math.min(10, width - 3), "VOLTAR", function() selected=nil end)
+end
+
+local function drawPlayer()
+	local state = is_error and "ERRO" or is_loading and "CARREGANDO" or playing and "TOCANDO" or "PARADO"
+	local stateColor = is_error and colors.red or is_loading and colors.orange or playing and colors.lime or colors.lightGray
+	text(2, 4, "AGORA TOCANDO", colors.lightBlue)
+	text(math.max(20, width - #state - 1), 4, state, stateColor)
+	text(2, 5, now_playing and now_playing.name or "Nenhuma musica selecionada", now_playing and colors.cyan or colors.white, colors.black, width - 3)
+	text(2, 6, now_playing and now_playing.artist or "Abra BUSCA para escolher uma musica.", colors.lightGray, colors.black, width - 3)
+	if is_error then
+		text(2, 7, audio_error or "Falha no audio", colors.red, colors.black, width - 3)
+	else
+		text(2, 7, string.format("TEMPO ENVIADO  %02d:%02d", math.floor(elapsed_samples / 2880000), math.floor(elapsed_samples / 48000) % 60), colors.gray)
+	end
+
+	local canPlay = now_playing ~= nil or #queue > 0
+	button(2, 9, 10, playing and "PARAR" or "TOCAR", function()
+		if playing then
+			playing=false
+			stopAllSpeakers()
+		elseif now_playing then
+			playTrack(now_playing)
+		elseif #queue > 0 then
+			playTrack(table.remove(queue, 1))
+		end
+	end, playing, canPlay)
+	button(13, 9, 9, "PULAR", skipTrack, false, now_playing ~= nil or #queue > 0)
+	local loopLabel = ({"LOOP OFF", "LOOP FILA", "LOOP 1"})[looping + 1]
+	button(23, 9, math.min(13, width - 24), loopLabel, function() looping=(looping+1)%3 end, looping > 0)
+
+	local percent = math.floor(volume / 3 * 100 + 0.5)
+	text(2, 11, "VOLUME", colors.lightBlue)
+	local percentage = percent .. "%"
+	text(math.max(10, width - #percentage - 1), 11, percentage, colors.cyan)
+	local barWidth = math.max(4, width - 3)
+	local filled = math.floor(barWidth * volume / 3 + 0.5)
+	fill(2, 12, 1 + barWidth, 12, colors.gray)
+	if filled > 0 then fill(2, 12, 1 + filled, 12, colors.cyan) end
+
+	text(2, 14, "FILA", colors.lightBlue)
+	text(8, 14, tostring(#queue) .. " faixa" .. (#queue == 1 and "" or "s"), colors.lightGray)
+	local visible = math.max(0, height - 15)
+	if #queue == 0 then
+		text(2, 16, "A fila esta vazia.", colors.gray)
+	else
+		for row = 0, visible - 1 do
+			local index = scroll[1] + row + 1
+			local item = queue[index]
+			if item then
+				text(2, 15 + row, tostring(index), colors.gray)
+				text(5, 15 + row, item.name, colors.white, colors.black, width - 6)
+			end
+		end
+	end
+end
+
+local function drawSearch()
+	text(2, 4, "BUSCAR MUSICA OU VIDEO", colors.lightBlue)
+	fill(2, 5, width - 1, 5, waiting_for_input and colors.white or colors.lightGray)
+	local prompt = query_text ~= "" and query_text or "Cole um link ou digite uma musica"
+	text(3, 5, prompt, query_text ~= "" and colors.black or colors.gray, waiting_for_input and colors.white or colors.lightGray, width - 4)
+	text(2, 6, waiting_for_input and "Digite e pressione ENTER" or "Clique no campo para editar", colors.gray)
+	if waiting_for_input then
+		term.setCursorPos(math.min(width - 1, 3 + #query_text), 5)
+		term.setCursorBlink(true)
+	end
+
+	if search_notice then
+		text(2, 8, search_notice, colors.orange, colors.black, width - 3)
+	elseif search_error then
+		text(2, 8, "Nao foi possivel completar a busca.", colors.red)
+	elseif last_spotify_url or last_spotify_embed_url then
+		text(2, 8, "Consultando o Spotify...", colors.lime)
+	elseif not search_results and last_search_url then
+		text(2, 8, "Buscando...", colors.orange)
+	elseif not search_results then
+		text(2, 8, "YouTube, Spotify ou backend configurado", colors.lightGray)
+	end
+
+	local visible = math.max(0, math.floor((height - 10) / 2))
+	for row = 0, visible - 1 do
+		local index = scroll[2] + row + 1
+		local item = search_results and search_results[index]
+		if item then
+			local y = 8 + row * 2
+			text(2, y, tostring(index) .. ".", colors.gray)
+			text(5, y, item.name, colors.cyan, colors.black, width - 6)
+			text(5, y + 1, item.artist, colors.lightGray, colors.black, width - 6)
+			buttons[#buttons + 1] = {x=1, y=y, w=width, h=2, enabled=true, action=function()
+				selected=item
+				waiting_for_input=false
+			end}
+		end
+	end
+end
+
+local function drawOutputs()
+	text(2, 4, "SPEAKERS CONECTADOS", colors.lightBlue)
+	local summary = tostring(#speakers) .. " detectado" .. (#speakers == 1 and "" or "s")
+	text(math.max(22, width - #summary - 1), 4, summary, colors.cyan)
+	text(2, 5, "O grupo fica fixo durante cada faixa.", colors.lightGray, colors.black, width - 3)
+	text(2, 6, "Novos speakers entram ao reiniciar.", colors.gray, colors.black, width - 3)
+	button(2, 8, math.min(18, width - 3), "REINICIAR GRUPO", function()
+		refreshSpeakers()
+		if now_playing then playTrack(now_playing) end
+	end, false, now_playing ~= nil)
+
+	local visible = math.max(0, height - 10)
+	for row = 0, visible - 1 do
+		local item = speakers[scroll[3] + row + 1]
+		if item then
+			local y = 10 + row
+			text(2, y, "+", colors.lime)
+			text(5, y, item.name, colors.white, colors.black, width - 6)
+		end
+	end
 end
 
 function redrawScreen()
@@ -192,108 +364,55 @@ function redrawScreen()
 	term.setCursorBlink(false)
 	term.setBackgroundColor(colors.black)
 	term.clear()
-	bar(1, colors.blue)
-	text(2,1,"MUSIC / 3.0",colors.white,colors.blue)
-	local count = tostring(#speakers) .. " SPK"
-	text(math.max(16,width-#count),1,count,colors.cyan,colors.blue)
-	button(2,2,"PLAYER",function() tab=1; selected=nil end,tab==1)
-	button(11,2,"BUSCA",function() tab=2; selected=nil end,tab==2)
-	button(19,2,"SAIDAS",function() tab=3; selected=nil end,tab==3)
-	bar(height, colors.gray)
-	text(2,height,"Roda: rolar | Ctrl+T: sair",colors.lightGray,colors.gray)
-	if selected then
-		text(2,4,selected.name,colors.cyan)
-		text(2,5,selected.artist,colors.lightGray)
-		button(2,7,"TOCAR AGORA",function() playTrack(selected) end,true)
-		button(2,9,"PROXIMA",function() queueItem(selected,true) end)
-		button(2,11,"ADICIONAR A FILA",function() queueItem(selected,false) end)
-		button(2,13,"VOLTAR",function() selected=nil end)
-	elseif tab == 1 then
-		text(2,4,now_playing and now_playing.name or "Sua proxima musica comeca aqui",colors.cyan)
-		text(2,5,now_playing and now_playing.artist or "Abra BUSCA e cole um link.",colors.lightGray)
-		local state = is_error and "ERRO" or is_loading and "CARREGANDO" or playing and "TOCANDO" or "PARADO"
-		text(2,6,state .. "  /  " .. math.floor(elapsed_samples/48000) .. "s enviados",is_error and colors.red or colors.lime)
-		button(2,8,playing and "PARAR" or "TOCAR",function()
-			if playing then playing=false; stopAllSpeakers()
-			elseif now_playing then playTrack(now_playing)
-			elseif #queue>0 then playTrack(table.remove(queue,1)) end
-		end,playing)
-		button(11,8,"PULAR",skipTrack)
-		button(20,8,({"LOOP -","LOOP FILA","LOOP 1"})[looping+1],function() looping=(looping+1)%3 end,looping>0)
-		local w = math.max(2,width-13)
-		local n = math.floor(w*volume/3+0.5)
-		text(2,10,string.rep(" ",n),colors.black,colors.cyan)
-		text(2+n,10,string.rep(" ",w-n),colors.white,colors.gray)
-		text(w+3,10,math.floor(volume/3*100+0.5).."%",colors.cyan)
-		text(2,12,"FILA / "..#queue,colors.lightBlue)
-		if is_error then text(2,13,audio_error or "Falha no audio",colors.red)
-		else
-			for row=0,math.max(-1,height-15) do
-				local index=scroll[1]+row+1
-				if queue[index] then text(2,14+row,index..". "..queue[index].name) end
-			end
-		end
-	elseif tab == 2 then
-		bar(4,colors.gray)
-		text(2,4,(waiting_for_input and "> " or "Buscar: ")..query_text,colors.white,colors.gray,width-2)
-		text(2,5,"Cole o link, depois pressione Enter",colors.lightGray)
-		if waiting_for_input then
-			term.setCursorPos(math.min(width,4+#query_text),4)
-			term.setCursorBlink(true)
-		end
-		if search_notice then text(2,7,search_notice,colors.orange)
-		elseif search_error then text(2,7,"Falha na busca. Tente novamente.",colors.red)
-		elseif last_spotify_url or last_spotify_embed_url then text(2,7,"Consultando Spotify...",colors.lime)
-		elseif not search_results and last_search_url then text(2,7,"Buscando...",colors.orange) end
-		for row=0,math.floor((height-9)/2) do
-			local index=scroll[2]+row+1
-			local item=search_results and search_results[index]
-			if item then
-				local y=8+row*2
-				text(2,y,index..". "..item.name,colors.cyan)
-				text(4,y+1,item.artist,colors.lightGray)
-				buttons[#buttons+1]={x=1,y=y,w=width,h=2,action=function() selected=item; waiting_for_input=false end}
-			end
-		end
-	elseif tab == 3 then
-		text(2,4,"SAIDAS CONECTADAS / "..#speakers,colors.cyan)
-		text(2,5,"Novas saidas entram na proxima faixa.",colors.lightGray)
-		text(2,6,"Use 1 conexao por speaker; evite aliases.",colors.orange)
-		button(2,7,"REINICIAR GRUPO",function()
-			refreshSpeakers()
-			if now_playing then playTrack(now_playing) end
-		end)
-		for row=0,height-10 do
-			local item=speakers[scroll[3]+row+1]
-			if item then text(2,8+row,"+ "..item.name,colors.lime) end
-		end
-	end
+	drawHeader()
+	drawFooter()
+	if selected then drawSelection()
+	elseif tab == 1 then drawPlayer()
+	elseif tab == 2 then drawSearch()
+	else drawOutputs() end
+end
+
+local function visibleRows()
+	if tab == 1 then return math.max(1, height - 15) end
+	if tab == 2 then return math.max(1, math.floor((height - 10) / 2)) end
+	return math.max(1, height - 10)
 end
 
 function uiLoop()
 	while true do
 		redrawScreen()
-		local event,a,b,c = os.pullEvent()
-		if event=="mouse_click" then
-			if tab==2 and not selected and c==4 then
-				waiting_for_input=true
+		local event, a, b, c = os.pullEvent()
+		if event == "mouse_click" then
+			if tab == 2 and not selected and c == 5 then
+				waiting_for_input = true
 			else
 				for _, hit in ipairs(buttons) do
-					if b>=hit.x and b<hit.x+hit.w and c>=hit.y and c<hit.y+(hit.h or 1) then hit.action(); break end
+					if hit.enabled and b >= hit.x and b < hit.x + hit.w and c >= hit.y and c < hit.y + hit.h then
+						hit.action()
+						break
+					end
 				end
 			end
 		end
-		if (event=="mouse_click" or event=="mouse_drag") and a==1 and tab==1 and not selected and c==10 then
-			volume=math.max(0,math.min(3,(b-2)/math.max(1,width-14)*3))
-		elseif event=="mouse_scroll" then
-			local total=tab==1 and #queue or tab==2 and #(search_results or {}) or #speakers
-			scroll[tab]=math.max(0,math.min(math.max(0,total-1),scroll[tab]+a))
-		elseif tab==2 and not selected then
-			if event=="paste" or event=="char" then query_text=query_text..a; waiting_for_input=true
-			elseif event=="key" and a==keys.backspace then query_text=query_text:sub(1,-2)
-			elseif event=="key" and a==keys.enter then waiting_for_input=false; submitSearch(query_text) end
+		if (event == "mouse_click" or event == "mouse_drag") and a == 1 and tab == 1 and not selected and c == 12 then
+			local barWidth = math.max(4, width - 3)
+			volume = math.max(0, math.min(3, (b - 2) / math.max(1, barWidth - 1) * 3))
+		elseif event == "mouse_scroll" then
+			local total = tab == 1 and #queue or tab == 2 and #(search_results or {}) or #speakers
+			local maximum = math.max(0, total - visibleRows())
+			scroll[tab] = math.max(0, math.min(maximum, scroll[tab] + a))
+		elseif tab == 2 and not selected then
+			if event == "paste" or event == "char" then
+				query_text = query_text .. a
+				waiting_for_input = true
+			elseif event == "key" and a == keys.backspace then
+				query_text = query_text:sub(1, -2)
+			elseif event == "key" and a == keys.enter then
+				waiting_for_input = false
+				submitSearch(query_text)
+			end
 		end
-		if event=="peripheral" or event=="peripheral_detach" then refreshSpeakers() end
+		if event == "peripheral" or event == "peripheral_detach" then refreshSpeakers() end
 	end
 end
 
