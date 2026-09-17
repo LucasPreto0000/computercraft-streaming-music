@@ -2,7 +2,7 @@
 
 An improved music player for Minecraft computers running CC: Tweaked.
 
-**Version:** 3.2
+**Version:** 3.3
 
 ## Install or update
 
@@ -31,7 +31,9 @@ keeps the previous version as `music.bak`.
   live number of detected speakers.
 - Direct YouTube links appear immediately and can be played while metadata is
   still loading in the background.
-- Starts at CC: Tweaked's maximum supported speaker volume (`3.0`).
+- The volume slider shows the real CC:Tweaked scale: `100%` is normal volume
+  (`1.0`) and `300%` is the API maximum (`3.0`). Audio is streamed in 8 KiB
+  DFPWM chunks so changes reach the speakers sooner.
 - Uses every connected speaker found on the wired peripheral network.
 - Dispatches speaker calls concurrently through CC:Tweaked's native parallel
   scheduler, arranged as a binary tree so large groups do not duplicate chunks

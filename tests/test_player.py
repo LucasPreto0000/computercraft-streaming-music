@@ -83,6 +83,8 @@ class PlayerTests(unittest.TestCase):
                 result=function() return search_results, search_notice end,
                 refresh=refreshSpeakers,
                 count=function() return #speakers end,
+                slider=setVolumeFromSlider,
+                volume=function() return volume end,
                 snapshot=function() return table.concat(screen,"\\n") end,
                 click=function(x,y)
                     for _,hit in ipairs(buttons) do
@@ -110,6 +112,7 @@ class PlayerTests(unittest.TestCase):
         self.assertIn("MUSIC PLAYER", player.splitlines()[0])
         self.assertIn("AGORA TOCANDO", player)
         self.assertIn("VOLUME", player)
+        self.assertIn("300%", player)
         self.assertIn("FILA", player)
         self.assertIn("CTRL+T: sair", player.splitlines()[-1])
 
@@ -119,6 +122,13 @@ class PlayerTests(unittest.TestCase):
         self.assertTrue(api.click(45, 2))  # Empty area inside the SAIDAS segment.
         api.render()
         self.assertIn("SPEAKERS CONECTADOS", api.snapshot())
+
+    def test_volume_slider_uses_real_zero_to_300_percent_scale(self):
+        _, api = self.runtime()
+        self.assertAlmostEqual(api.volume(), 3.0)
+        self.assertAlmostEqual(api.slider(2), 0.0)
+        self.assertAlmostEqual(api.slider(49), 3.0)
+        self.assertAlmostEqual(api.slider(18), 48 / 47, places=6)
 
     def test_parallel_dispatch_and_barrier(self):
         for count in (1, 6, 128, 1000):

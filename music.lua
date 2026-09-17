@@ -1,5 +1,5 @@
 local api_base_url = "https://ipod-2to6magyna-uc.a.run.app/"
-local version = "3.2"
+local version = "3.3"
 local media_backend = settings.get("music.media_backend", "")
 local revision = 0
 local audio_error = nil
@@ -23,8 +23,12 @@ local playing = false
 local queue = {}
 local now_playing = nil
 local looping = 0
--- CC:Tweaked accepts values from 0.0 to 3.0. Start at the real maximum.
-local volume = 3.0
+-- CC:Tweaked uses 1.0 as normal volume and accepts up to 3.0 (300%).
+local max_volume = 3.0
+local volume = max_volume
+-- 8 KiB of DFPWM is about 1.36 seconds. This makes volume changes audible
+-- sooner without shrinking the speaker buffer enough to cause heavy stutter.
+local audio_chunk_bytes = 8 * 1024
 
 local playing_id = nil
 local cancelledDownloads = {}
@@ -270,12 +274,12 @@ local function drawPlayer()
 	local loopLabel = ({"LOOP OFF", "LOOP FILA", "LOOP 1"})[looping + 1]
 	button(23, 9, math.min(13, width - 24), loopLabel, function() looping=(looping+1)%3 end, looping > 0)
 
-	local percent = math.floor(volume / 3 * 100 + 0.5)
+	local percent = math.floor(volume * 100 + 0.5)
 	text(2, 11, "VOLUME", colors.lightBlue)
 	local percentage = percent .. "%"
 	text(math.max(10, width - #percentage - 1), 11, percentage, colors.cyan)
 	local barWidth = math.max(4, width - 3)
-	local filled = math.floor(barWidth * volume / 3 + 0.5)
+	local filled = math.floor(barWidth * volume / max_volume + 0.5)
 	fill(2, 12, 1 + barWidth, 12, colors.gray)
 	if filled > 0 then fill(2, 12, 1 + filled, 12, colors.cyan) end
 
@@ -294,6 +298,13 @@ local function drawPlayer()
 			end
 		end
 	end
+end
+
+local function setVolumeFromSlider(x)
+	local barWidth = math.max(4, width - 3)
+	local ratio = (x - 2) / math.max(1, barWidth - 1)
+	volume = math.max(0, math.min(max_volume, ratio * max_volume))
+	return volume
 end
 
 local function drawSearch()
@@ -395,8 +406,7 @@ function uiLoop()
 			end
 		end
 		if (event == "mouse_click" or event == "mouse_drag") and a == 1 and tab == 1 and not selected and c == 12 then
-			local barWidth = math.max(4, width - 3)
-			volume = math.max(0, math.min(3, (b - 2) / math.max(1, barWidth - 1) * 3))
+			setVolumeFromSlider(b)
 		elseif event == "mouse_scroll" then
 			local total = tab == 1 and #queue or tab == 2 and #(search_results or {}) or #speakers
 			local maximum = math.max(0, total - visibleRows())
@@ -518,7 +528,7 @@ function audioLoop()
 						os.queueEvent("redraw_screen")
 						local final_duration = 0
 						while true do
-							local chunk = handle.read(16 * 1024)
+							local chunk = handle.read(audio_chunk_bytes)
 							if not chunk or #chunk == 0 then break end
 							local samples = decode(chunk)
 							playBufferOnAllSpeakers(samples, group)
