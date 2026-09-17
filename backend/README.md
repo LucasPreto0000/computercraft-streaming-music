@@ -15,8 +15,10 @@ python backend/server.py
 No PowerShell, use `$env:MUSIC_TOKEN="..."` e `$env:MUSIC_ALLOWED_HOSTS="..."`.
 Adicione explicitamente o hostname de cada site desejado a MUSIC_ALLOWED_HOSTS.
 
-O servico escuta apenas em 127.0.0.1:8080. Publique-o atras de um proxy HTTPS
-com autenticacao preservada, limites de requisicoes e timeout de conversao.
+O servico escuta em 0.0.0.0 e usa a porta da variavel `PORT` (10000 por padrao).
+O endpoint publico `/health` pode ser usado pela hospedagem para verificar o
+processo. Publique-o atras de HTTPS com autenticacao preservada, limites de
+requisicoes e timeout de conversao.
 Execute em container/host isolado, sem credenciais de nuvem, bloqueando saidas
 para redes privadas e endpoints de metadata: extratores podem seguir redirects
 e requisitar outros hosts. Nao abra este conversor como proxy publico.

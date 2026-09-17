@@ -53,10 +53,17 @@ class Handler(BaseHTTPRequestHandler):
         pass  # Do not log private/signed URLs or authorization headers.
 
     def do_GET(self):
+        parsed = urlsplit(self.path)
+        if parsed.path == "/health":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+            return
         if not hmac.compare_digest(self.headers.get("Authorization", ""), "Bearer " + TOKEN):
             self.send_error(401, "Authentication required")
             return
-        parsed = urlsplit(self.path)
         if parsed.path != "/audio":
             self.send_error(404)
             return
@@ -89,4 +96,4 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     if len(TOKEN) < 24 or not HOSTS:
         raise SystemExit("Set MUSIC_TOKEN (24+ characters) and MUSIC_ALLOWED_HOSTS")
-    ThreadingHTTPServer(("127.0.0.1", int(os.environ.get("PORT", "8080"))), Handler).serve_forever()
+    ThreadingHTTPServer(("0.0.0.0", int(os.environ.get("PORT", "10000"))), Handler).serve_forever()
