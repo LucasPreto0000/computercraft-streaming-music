@@ -1,5 +1,5 @@
 local api_base_url = "https://ipod-2to6magyna-uc.a.run.app/"
-local version = "3.1"
+local version = "3.2"
 local media_backend = settings.get("music.media_backend", "")
 local revision = 0
 local audio_error = nil
@@ -416,27 +416,21 @@ function uiLoop()
 	end
 end
 
--- Table-based scheduler: each peripheral call starts before waiting for the
--- others. No unpack/function-argument ceiling, and event filters are preserved.
+-- Build a binary tree of CC:Tweaked's native parallel scheduler. Each leaf is
+-- one speaker, but every waitForAll call receives only two functions. This
+-- avoids table.unpack's argument ceiling while leaving task_complete and
+-- speaker_audio_empty event routing to the scheduler bundled with CraftOS.
 local function runWorkers(workers)
-	local tasks = {}
-	for i, fn in ipairs(workers) do tasks[i] = {co = coroutine.create(fn)} end
-	local event = {n = 0}
-	while true do
-		local alive = false
-		for _, task in ipairs(tasks) do
-			if coroutine.status(task.co) ~= "dead" then
-				if not task.filter or task.filter == event[1] or event[1] == "terminate" then
-					local ok, filter = coroutine.resume(task.co, table.unpack(event, 1, event.n))
-					if not ok then error(filter, 0) end
-					task.filter = filter
-				end
-				if coroutine.status(task.co) ~= "dead" then alive = true end
-			end
-		end
-		if not alive then return end
-		event = table.pack(os.pullEventRaw())
+	local function runRange(first, last)
+		if first > last then return end
+		if first == last then return workers[first]() end
+		local middle = math.floor((first + last) / 2)
+		parallel.waitForAll(
+			function() runRange(first, middle) end,
+			function() runRange(middle + 1, last) end
+		)
 	end
+	runRange(1, #workers)
 end
 
 local function playBufferOnAllSpeakers(audio, group)

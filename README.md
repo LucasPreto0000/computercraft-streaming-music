@@ -2,7 +2,7 @@
 
 An improved music player for Minecraft computers running CC: Tweaked.
 
-**Version:** 3.1
+**Version:** 3.2
 
 ## Install or update
 
@@ -33,8 +33,10 @@ keeps the previous version as `music.bak`.
   still loading in the background.
 - Starts at CC: Tweaked's maximum supported speaker volume (`3.0`).
 - Uses every connected speaker found on the wired peripheral network.
-- Dispatches speaker calls concurrently with a table-based coroutine scheduler.
-  Every speaker must report readiness before the next chunk is sent.
+- Dispatches speaker calls concurrently through CC:Tweaked's native parallel
+  scheduler, arranged as a binary tree so large groups do not duplicate chunks
+  or hit Lua's function-argument ceiling. Every speaker must report readiness
+  before the next chunk is sent.
 - No hardcoded speaker-count limit. Tested with up to 1,000 simulated speakers;
   actual capacity and audible synchronization depend on Minecraft, CC and lag.
 - Fixed group per track: newly attached speakers join on the next track or via

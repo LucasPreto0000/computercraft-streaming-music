@@ -50,6 +50,28 @@ class PlayerTests(unittest.TestCase):
             }
             textutils = {urlEncode=function(s) return s end}
             http = {request=function() return true end}
+            parallel = {waitForAll=function(...)
+                local tasks, functions = {}, table.pack(...)
+                for i=1,functions.n do
+                    tasks[i]={co=coroutine.create(functions[i])}
+                end
+                local event={n=0}
+                while true do
+                    local alive=false
+                    for _,task in ipairs(tasks) do
+                        if coroutine.status(task.co)~="dead" then
+                            if not task.filter or task.filter==event[1] or event[1]=="terminate" then
+                                local ok,filter=coroutine.resume(task.co,table.unpack(event,1,event.n))
+                                if not ok then error(filter,0) end
+                                task.filter=filter
+                            end
+                            if coroutine.status(task.co)~="dead" then alive=true end
+                        end
+                    end
+                    if not alive then return end
+                    event=table.pack(coroutine.yield())
+                end
+            end}
         """)
         prefix = SOURCE[:SOURCE.index(ENTRY)]
         api = lua.execute(prefix + """
@@ -145,6 +167,30 @@ class PlayerTests(unittest.TestCase):
             assert(coroutine.resume(co,"speaker_audio_empty","speaker_2"))
             assert(coroutine.status(co)=="dead")
             assert(calls[1]==1 and calls[2]==2)
+        """)
+
+    def test_out_of_order_completions_do_not_duplicate_audio(self):
+        lua, _ = self.runtime()
+        lua.execute("""
+            local calls, group = {}, {}
+            for i=1,64 do
+                local name="speaker_"..i
+                group[i]={name=name,device={playAudio=function()
+                    calls[name]=(calls[name] or 0)+1
+                    coroutine.yield("task_complete")
+                    return true
+                end}}
+            end
+            local co=coroutine.create(function() api.play({1,2,3},group) end)
+            assert(coroutine.resume(co))
+            for i=64,1,-1 do
+                assert(coroutine.resume(co,"task_complete",i,true))
+            end
+            for i=1,64 do
+                assert(coroutine.resume(co,"speaker_audio_empty","speaker_"..i))
+            end
+            assert(coroutine.status(co)=="dead")
+            for i=1,64 do assert(calls["speaker_"..i]==1) end
         """)
 
     def test_detach_and_timeout_surface_errors(self):
