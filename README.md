@@ -1,19 +1,42 @@
-# Streaming music in Minecraft (ComputerCraft CC: Tweaked mod)
+# ComputerCraft Streaming Music — Enhanced Fork
 
-**Version:** 2.1
+An improved music player for Minecraft computers running CC: Tweaked.
 
-**Install:** `pastebin get Rc1PCzLH music`
+**Version:** 2.2
 
-To update from the original version, run `delete music` first.
+## Install or update
 
-**Run:** `music`
+Run this command in your CC: Tweaked computer:
+
+```lua
+wget run https://raw.githubusercontent.com/LucasPreto0000/computercraft-streaming-music/main/install.lua
+```
+
+Then start the player with:
+
+```lua
+music
+```
+
+The installer downloads this fork directly from GitHub. When updating, it
+keeps the previous version as `music.bak`.
+
+## Improvements in this fork
+
+- Direct YouTube links appear immediately and can be played while metadata is
+  still loading in the background.
+- Starts at CC: Tweaked's maximum supported speaker volume (`3.0`).
+- Uses every connected speaker found on the wired peripheral network.
+- Keeps large speaker arrays synchronized without creating one coroutine per
+  speaker or silently dropping chunks when one speaker is busy.
+- Detects speakers again during playback, supporting network changes.
 
 ## How to use
 
 1. Install the [CC: Tweaked](https://tweaked.cc/) mod to your world/server. Make sure you're using version 1.100.0 of the mod (released December 2021) or newer, or it won't work.
 2. Craft an Advanced Computer and connect it to a speaker, or craft an Advanced Noisy Pocket Computer.
-3. Open the computer and then drag and drop the `music.lua` script on top of the Minecraft window to transfer the file over.
-4. Run the `music` command and enjoy your music!
+3. Run the installation command above.
+4. Run the `music` command and enjoy your music.
 
 ## Troubleshooting
 - "No speakers attached" when using an Advanced Noisy Pocket Computer: Restart your Minecraft game. If that doesn't work, restart the server.
@@ -22,7 +45,8 @@ To update from the original version, run `delete music` first.
 ## How to self-host
 
 > [!IMPORTANT]  
-> Self-hosting is not required to use this program. You can simply use the pastebin command above.
+> Self-hosting is not required to use this program. You can use the GitHub
+> installation command above.
 
 The ComputerCraft program connects to a web server to download the music files. This server is hosted with Firebase Cloud Functions. The server uses two unofficial APIs on RapidAPI: one for searching YouTube and one for downloading the audio.
 

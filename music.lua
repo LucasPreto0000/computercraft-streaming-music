@@ -1,5 +1,5 @@
 local api_base_url = "https://ipod-2to6magyna-uc.a.run.app/"
-local version = "2.1"
+local version = "2.2"
 
 local width, height = term.getSize()
 local tab = 1
@@ -16,7 +16,8 @@ local playing = false
 local queue = {}
 local now_playing = nil
 local looping = 0
-local volume = 1.5
+-- CC:Tweaked accepts values from 0.0 to 3.0. Start at the real maximum.
+local volume = 3.0
 
 local playing_id = nil
 local last_download_url = nil
@@ -32,7 +33,44 @@ local decoder = require "cc.audio.dfpwm".make_decoder()
 local needs_next_chunk = 0
 local buffer
 
-local speakers = { peripheral.find("speaker") }
+-- Do not collect peripheral.find's multiple return values here. Enumerating the
+-- peripheral names has no practical vararg limit and also lets us refresh the
+-- list when wired speakers are attached or removed while the program is open.
+local speakers = {}
+
+local function refreshSpeakers()
+	local found = {}
+	for _, name in ipairs(peripheral.getNames()) do
+		if peripheral.hasType(name, "speaker") then
+			found[#found + 1] = {
+				name = name,
+				device = peripheral.wrap(name)
+			}
+		end
+	end
+	speakers = found
+	return #speakers
+end
+
+local function stopAllSpeakers()
+	for _, speaker in ipairs(speakers) do
+		pcall(speaker.device.stop)
+	end
+	os.queueEvent("playback_stopped")
+end
+
+local function extractYouTubeVideoId(value)
+	if not value then return nil end
+	value = value:gsub("&amp;", "&")
+	local id = value:match("[?&]v=([%w_-]+)")
+		or value:match("youtu%.be/([%w_-]+)")
+		or value:match("youtube%.com/shorts/([%w_-]+)")
+		or value:match("youtube%.com/embed/([%w_-]+)")
+	if id and #id == 11 then return id end
+	return nil
+end
+
+refreshSpeakers()
 if #speakers == 0 then
 	error("No speakers attached. You need to connect a speaker to this computer. If this is an Advanced Noisy Pocket Computer, then this is a bug, and you should try restarting your Minecraft game.", 0)
 end
@@ -258,9 +296,20 @@ function uiLoop()
 					if string.len(input) > 0 then
 						last_search = input
 						last_search_url = api_base_url .. "?v=" .. version .. "&search=" .. textutils.urlEncode(input)
-						http.request(last_search_url)
-						search_results = nil
+						local direct_id = extractYouTubeVideoId(input)
+						if direct_id then
+							-- Show a usable result immediately. The metadata request below
+							-- replaces this placeholder when it finishes.
+							search_results = {{
+								id = direct_id,
+								name = "YouTube video",
+								artist = "Direct link - ready to play"
+							}}
+						else
+							search_results = nil
+						end
 						search_error = false
+						http.request(last_search_url)
 					else
 						last_search = nil
 						last_search_url = nil
@@ -340,10 +389,7 @@ function uiLoop()
 								term.write("Play now")
 								sleep(0.2)
 								in_search_result = false
-								for _, speaker in ipairs(speakers) do
-									speaker.stop()
-									os.queueEvent("playback_stopped")
-								end
+								stopAllSpeakers()
 								playing = true
 								is_error = false
 								playing_id = nil
@@ -421,10 +467,7 @@ function uiLoop()
 									end
 									if playing then
 										playing = false
-										for _, speaker in ipairs(speakers) do
-											speaker.stop()
-											os.queueEvent("playback_stopped")
-										end
+										stopAllSpeakers()
 										playing_id = nil
 										is_loading = false
 										is_error = false
@@ -455,10 +498,7 @@ function uiLoop()
 		
 										is_error = false
 										if playing then
-											for _, speaker in ipairs(speakers) do
-												speaker.stop()
-												os.queueEvent("playback_stopped")
-											end
+											stopAllSpeakers()
 										end
 										if #queue > 0 then
 											if looping == 1 then
@@ -543,6 +583,48 @@ function uiLoop()
 	end
 end
 
+local function playBufferOnAllSpeakers(audio, expected_id)
+	refreshSpeakers()
+	if #speakers == 0 then
+		return false, "No speakers attached"
+	end
+
+	-- Keep retrying only the speakers which have not accepted this chunk yet.
+	-- This prevents a busy speaker from silently losing chunks and avoids one
+	-- coroutine per speaker, so large wired networks remain cheap and in sync.
+	local pending = {}
+	for _, speaker in ipairs(speakers) do
+		pending[speaker.name] = speaker.device
+	end
+
+	while next(pending) do
+		for name, device in pairs(pending) do
+			local ok, accepted = pcall(device.playAudio, audio, volume)
+			if not ok then
+				-- It was probably detached. Do not block every other speaker.
+				pending[name] = nil
+			elseif accepted then
+				pending[name] = nil
+			end
+		end
+
+		if next(pending) then
+			local event = os.pullEventRaw()
+			if event == "terminate" then
+				error("Terminated", 0)
+			elseif event == "playback_stopped" then
+				return false
+			end
+		end
+
+		if not playing or playing_id ~= expected_id then
+			return false
+		end
+	end
+
+	return true
+end
+
 function audioLoop()
 	while true do
 
@@ -599,49 +681,8 @@ function audioLoop()
 				
 						buffer = decoder(chunk)
 						
-						local fn = {}
-						for i, speaker in ipairs(speakers) do 
-							fn[i] = function()
-								local name = peripheral.getName(speaker)
-								if #speakers > 1 then
-									if speaker.playAudio(buffer, volume) then
-										parallel.waitForAny(
-											function()
-												repeat until select(2, os.pullEvent("speaker_audio_empty")) == name
-											end,
-											function()
-												local event = os.pullEvent("playback_stopped")
-												return
-											end
-										)
-										if not playing or playing_id ~= thisnowplayingid then
-											return
-										end
-									end
-								else
-									while not speaker.playAudio(buffer, volume) do
-										parallel.waitForAny(
-											function()
-												repeat until select(2, os.pullEvent("speaker_audio_empty")) == name
-											end,
-											function()
-												local event = os.pullEvent("playback_stopped")
-												return
-											end
-										)
-										if not playing or playing_id ~= thisnowplayingid then
-											return
-										end
-									end
-								end
-								if not playing or playing_id ~= thisnowplayingid then
-									return
-								end
-							end
-						end
-						
-						local ok, err = pcall(parallel.waitForAll, table.unpack(fn))
-						if not ok then
+						local ok, accepted, err = pcall(playBufferOnAllSpeakers, buffer, thisnowplayingid)
+						if not ok or (not accepted and err) then
 							needs_next_chunk = 2
 							is_error = true
 							break
@@ -668,10 +709,20 @@ function httpLoop()
 				local event, url, handle = os.pullEvent("http_success")
 
 				if url == last_search_url then
-					search_results = textutils.unserialiseJSON(handle.readAll())
+					local body = handle.readAll()
+					handle.close()
+					local ok, results = pcall(textutils.unserialiseJSON, body)
+					if ok and type(results) == "table" then
+						-- Keep an instant direct-link placeholder if metadata lookup
+						-- returned nothing. The audio can still be requested by ID.
+						if #results > 0 or not search_results then
+							search_results = results
+						end
+					else
+						search_error = true
+					end
 					os.queueEvent("redraw_screen")
-				end
-				if url == last_download_url then
+				elseif url == last_download_url then
 					is_loading = false
 					player_handle = handle
 					start = handle.read(4)
@@ -679,6 +730,8 @@ function httpLoop()
 					playing_status = 1
 					os.queueEvent("redraw_screen")
 					os.queueEvent("audio_update")
+				else
+					handle.close()
 				end
 			end,
 			function()
