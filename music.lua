@@ -1,5 +1,5 @@
 local api_base_url = "https://ipod-2to6magyna-uc.a.run.app/"
-local version = "2.3"
+local version = "2.4"
 
 local width, height = term.getSize()
 local tab = 1
@@ -7,6 +7,9 @@ local tab = 1
 local waiting_for_input = false
 local last_search = nil
 local last_search_url = nil
+local last_spotify_url = nil
+local last_spotify_embed_url = nil
+local spotify_fallback_title = nil
 local search_results = nil
 local search_error = false
 local in_search_result = false
@@ -32,6 +35,7 @@ local size = nil
 local decoder = require "cc.audio.dfpwm".make_decoder()
 local needs_next_chunk = 0
 local buffer
+local filter_previous_sample = 0
 
 -- Do not collect peripheral.find's multiple return values here. Enumerating the
 -- peripheral names has no practical vararg limit and also lets us refresh the
@@ -68,6 +72,40 @@ local function extractYouTubeVideoId(value)
 		or value:match("youtube%.com/embed/([%w_-]+)")
 	if id and #id == 11 then return id end
 	return nil
+end
+
+local function isSpotifyUrl(value)
+	if not value then return false end
+	return value:match("^https?://open%.spotify%.com/") ~= nil
+		or value:match("^https?://spotify%.link/") ~= nil
+end
+
+local function spotifyOEmbedUrl(value)
+	local base = value:match("^https?://spotify%.link/") and "https://spotify.link" or "https://open.spotify.com"
+	return base .. "/oembed?url=" .. textutils.urlEncode(value)
+end
+
+local function requestMusicSearch(query)
+	last_search_url = api_base_url .. "?v=" .. version .. "&search=" .. textutils.urlEncode(query)
+	local requested = http.request(last_search_url)
+	if not requested then
+		last_search_url = nil
+		search_error = true
+	end
+	return requested
+end
+
+local function enhanceAudio(samples)
+	-- A very light low-pass filter reduces DFPWM quantisation hiss while
+	-- preserving almost all musical detail. Integer-style weights keep this
+	-- inexpensive enough to run continuously on a ComputerCraft computer.
+	for i = 1, #samples do
+		local current = samples[i]
+		local filtered = math.floor((current * 7 + filter_previous_sample) / 8 + 0.5)
+		samples[i] = filtered
+		filter_previous_sample = filtered
+	end
+	return samples
 end
 
 refreshSpeakers()
@@ -182,6 +220,8 @@ function drawSearch()
 		if #search_results == 0 then drawText(2, 7, "No results found", colors.orange, colors.black) end
 	elseif search_error then
 		drawText(2, 7, "Could not reach the music service", colors.red, colors.black)
+	elseif last_spotify_url or last_spotify_embed_url then
+		drawText(2, 7, "Reading Spotify link...", colors.lime, colors.black)
 	elseif last_search_url then
 		drawText(2, 7, "Searching...", colors.orange, colors.black)
 	else
@@ -212,27 +252,45 @@ function uiLoop()
 					term.setBackgroundColor(colors.white)
 					term.setTextColor(colors.black)
 					local input = read()
+					input = input:match("^%s*(.-)%s*$")
 
 					if string.len(input) > 0 then
 						last_search = input
-						last_search_url = api_base_url .. "?v=" .. version .. "&search=" .. textutils.urlEncode(input)
-						local direct_id = extractYouTubeVideoId(input)
-						if direct_id then
-							-- Show a usable result immediately. The metadata request below
-							-- replaces this placeholder when it finishes.
-							search_results = {{
-								id = direct_id,
-								name = "YouTube video",
-								artist = "Direct link - ready to play"
-							}}
-						else
-							search_results = nil
-						end
+						search_results = nil
 						search_error = false
-						http.request(last_search_url)
+
+						if isSpotifyUrl(input) then
+							last_search_url = nil
+							last_spotify_embed_url = nil
+							spotify_fallback_title = nil
+							last_spotify_url = spotifyOEmbedUrl(input)
+							local requested = http.request(last_spotify_url)
+							if not requested then
+								last_spotify_url = nil
+								search_error = true
+							end
+						else
+							last_spotify_url = nil
+							last_spotify_embed_url = nil
+							spotify_fallback_title = nil
+							local direct_id = extractYouTubeVideoId(input)
+							if direct_id then
+								-- Show a usable result immediately. The metadata request below
+								-- replaces this placeholder when it finishes.
+								search_results = {{
+									id = direct_id,
+									name = "YouTube video",
+									artist = "Direct link - ready to play"
+								}}
+							end
+							requestMusicSearch(input)
+						end
 					else
 						last_search = nil
 						last_search_url = nil
+						last_spotify_url = nil
+						last_spotify_embed_url = nil
+						spotify_fallback_title = nil
 						search_results = nil
 						search_error = false
 					end
@@ -554,6 +612,7 @@ function audioLoop()
 			local thisnowplayingid = now_playing.id
 			if playing_id ~= thisnowplayingid then
 				playing_id = thisnowplayingid
+				filter_previous_sample = 0
 				last_download_url = api_base_url .. "?v=" .. version .. "&id=" .. textutils.urlEncode(playing_id)
 				playing_status = 0
 				needs_next_chunk = 1
@@ -600,7 +659,7 @@ function audioLoop()
 							size = size + 4
 						end
 				
-						buffer = decoder(chunk)
+						buffer = enhanceAudio(decoder(chunk))
 						
 						local ok, accepted, err = pcall(playBufferOnAllSpeakers, buffer, thisnowplayingid)
 						if not ok or (not accepted and err) then
@@ -629,7 +688,55 @@ function httpLoop()
 			function()
 				local event, url, handle = os.pullEvent("http_success")
 
-				if url == last_search_url then
+				if url == last_spotify_url then
+					local body = handle.readAll()
+					handle.close()
+					last_spotify_url = nil
+					local ok, metadata = pcall(textutils.unserialiseJSON, body)
+					if ok and type(metadata) == "table" and type(metadata.title) == "string" then
+						spotify_fallback_title = metadata.title
+						local embed_url = metadata.iframe_url
+							or (type(metadata.html) == "string" and metadata.html:match('src="([^"]+)"'))
+						if embed_url then embed_url = embed_url:gsub("&amp;", "&") end
+						last_spotify_embed_url = embed_url
+						local requested = embed_url and http.request(embed_url)
+						if not requested then
+							last_spotify_embed_url = nil
+							requestMusicSearch(spotify_fallback_title .. " official audio")
+							spotify_fallback_title = nil
+						end
+					else
+						search_error = true
+					end
+					os.queueEvent("redraw_screen")
+				elseif url == last_spotify_embed_url then
+					local body = handle.readAll()
+					handle.close()
+					last_spotify_embed_url = nil
+					local json = body:match('<script[^>]-id="__NEXT_DATA__"[^>]*>(.-)</script>')
+					local ok, page = pcall(textutils.unserialiseJSON, json or "")
+					local entity = ok and page and page.props and page.props.pageProps
+						and page.props.pageProps.state and page.props.pageProps.state.data
+						and page.props.pageProps.state.data.entity
+					local title = entity and (entity.title or entity.name) or spotify_fallback_title
+					local artist_names = {}
+					if entity and type(entity.artists) == "table" then
+						for _, artist in ipairs(entity.artists) do
+							if type(artist) == "table" and type(artist.name) == "string" then
+								artist_names[#artist_names + 1] = artist.name
+							end
+						end
+					end
+					spotify_fallback_title = nil
+					if title then
+						local query = title
+						if #artist_names > 0 then query = query .. " " .. table.concat(artist_names, " ") end
+						requestMusicSearch(query .. " official audio")
+					else
+						search_error = true
+					end
+					os.queueEvent("redraw_screen")
+				elseif url == last_search_url then
 					local body = handle.readAll()
 					handle.close()
 					local ok, results = pcall(textutils.unserialiseJSON, body)
@@ -658,7 +765,20 @@ function httpLoop()
 			function()
 				local event, url = os.pullEvent("http_failure")	
 
-				if url == last_search_url then
+				if url == last_spotify_url then
+					last_spotify_url = nil
+					search_error = true
+					os.queueEvent("redraw_screen")
+				elseif url == last_spotify_embed_url then
+					last_spotify_embed_url = nil
+					if spotify_fallback_title then
+						requestMusicSearch(spotify_fallback_title .. " official audio")
+						spotify_fallback_title = nil
+					else
+						search_error = true
+					end
+					os.queueEvent("redraw_screen")
+				elseif url == last_search_url then
 					search_error = true
 					os.queueEvent("redraw_screen")
 				end

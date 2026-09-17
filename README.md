@@ -2,7 +2,7 @@
 
 An improved music player for Minecraft computers running CC: Tweaked.
 
-**Version:** 2.3
+**Version:** 2.4
 
 ## Install or update
 
@@ -23,6 +23,10 @@ keeps the previous version as `music.bak`.
 
 ## Improvements in this fork
 
+- Accepts public Spotify links. It reads the public title with Spotify oEmbed
+  and searches for the matching playable audio source.
+- Applies light PCM smoothing to reduce DFPWM hiss, while the self-hosted
+  backend uses higher-quality 48 kHz resampling and a limiter before encoding.
 - Redesigned responsive UI with clearer playback state, queue, volume, and the
   live number of detected speakers.
 - Direct YouTube links appear immediately and can be played while metadata is
@@ -32,6 +36,14 @@ keeps the previous version as `music.bak`.
 - Keeps large speaker arrays synchronized without creating one coroutine per
   speaker or silently dropping chunks when one speaker is busy.
 - Detects speakers again during playback, supporting network changes.
+
+## Spotify links
+
+Paste a public `open.spotify.com` or `spotify.link` URL into Search. Spotify
+audio is not downloaded or bypassed: the player obtains the public item title
+through Spotify's oEmbed endpoint, then searches for a corresponding playable
+source. Track links provide the most precise matches. Album and playlist links
+currently search by their collection title rather than importing every track.
 
 ## Connecting multiple speakers
 

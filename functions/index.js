@@ -54,9 +54,10 @@ export const ipod = onRequest({ memory: "512MiB", maxInstances: 3 }, (req, res) 
                             args: [
                                 '-analyzeduration', '0',
                                 '-loglevel', '0',
-                                '-f', 'dfpwm',
+                                '-af', 'aresample=48000:resampler=swr:filter_size=64:phase_shift=10:cutoff=0.97,alimiter=limit=0.97',
                                 '-ar', '48000',
-                                '-ac', '1'
+                                '-ac', '1',
+                                '-f', 'dfpwm'
                             ]
                         });
 
